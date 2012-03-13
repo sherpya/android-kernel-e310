@@ -1,0 +1,7328 @@
+/* Copyright (c) 2009, Code Aurora Forum. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 and
+ * only version 2 as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
+ *
+ */
+#include "mach/../../cci_smem.h"
+#include "mach/../../smd_private.h"
+#include <linux/delay.h>
+#include <linux/types.h>
+#include <linux/i2c.h>
+#include <linux/uaccess.h>
+#include <linux/miscdevice.h>
+#include <media/msm_camera.h>
+#include <mach/gpio.h>
+#include <mach/camera.h>
+#include "ov5642.h"
+#include <linux/slab.h>
+
+#include <linux/device.h> /* for vreg.h */
+#include <mach/vreg.h>
+
+#define OV5642_MODEL_ID	0x5642
+
+//Ouyang For flash light test   /Close/Torch/Flash  0/1/2
+#define REG_Light_CFG	1
+#define FLASH_LED_EN	128
+#define FLASH_LED_MODE	129
+
+/* PLL Registers */
+#define REG_PRE_PLL_CLK_DIV           0x0305
+#define REG_PLL_MULTIPLIER_MSB        0x0306
+#define REG_PLL_MULTIPLIER_LSB        0x0307
+#define REG_VT_PIX_CLK_DIV            0x0301
+#define REG_VT_SYS_CLK_DIV            0x0303
+#define REG_OP_PIX_CLK_DIV            0x0309
+#define REG_OP_SYS_CLK_DIV            0x030B
+
+/* Data Format Registers */
+#define REG_CCP_DATA_FORMAT_MSB       0x0112
+#define REG_CCP_DATA_FORMAT_LSB       0x0113
+
+/* Output Size */
+#define REG_X_OUTPUT_SIZE_MSB         0x034C
+#define REG_X_OUTPUT_SIZE_LSB         0x034D
+#define REG_Y_OUTPUT_SIZE_MSB         0x034E
+#define REG_Y_OUTPUT_SIZE_LSB         0x034F
+
+/* Binning */
+#define REG_X_EVEN_INC                0x0381
+#define REG_X_ODD_INC                 0x0383
+#define REG_Y_EVEN_INC                0x0385
+#define REG_Y_ODD_INC                 0x0387
+/*Reserved register */
+#define REG_BINNING_ENABLE            0x3014
+
+/* Frame Fotmat */
+#define REG_FRAME_LENGTH_LINES_MSB    0x0340
+#define REG_FRAME_LENGTH_LINES_LSB    0x0341
+#define REG_LINE_LENGTH_PCK_MSB       0x0342
+#define REG_LINE_LENGTH_PCK_LSB       0x0343
+
+/* MSR setting */
+/* Reserved registers */
+#define REG_SHADE_CLK_ENABLE          0x30AC
+#define REG_SEL_CCP                   0x30C4
+#define REG_VPIX                      0x3024
+#define REG_CLAMP_ON                  0x3015
+#define REG_OFFSET                    0x307E
+
+/* CDS timing settings */
+/* Reserved registers */
+#define REG_LD_START                  0x3000
+#define REG_LD_END                    0x3001
+#define REG_SL_START                  0x3002
+#define REG_SL_END                    0x3003
+#define REG_RX_START                  0x3004
+#define REG_S1_START                  0x3005
+#define REG_S1_END                    0x3006
+#define REG_S1S_START                 0x3007
+#define REG_S1S_END                   0x3008
+#define REG_S3_START                  0x3009
+#define REG_S3_END                    0x300A
+#define REG_CMP_EN_START              0x300B
+#define REG_CLP_SL_START              0x300C
+#define REG_CLP_SL_END                0x300D
+#define REG_OFF_START                 0x300E
+#define REG_RMP_EN_START              0x300F
+#define REG_TX_START                  0x3010
+#define REG_TX_END                    0x3011
+#define REG_STX_WIDTH                 0x3012
+#define REG_TYPE1_AF_ENABLE           0x3130
+#define DRIVER_ENABLED                0x0001
+#define AUTO_START_ENABLED            0x0010
+#define REG_NEW_POSITION              0x3131
+#define REG_3152_RESERVED             0x3152
+#define REG_315A_RESERVED             0x315A
+#define REG_ANALOGUE_GAIN_CODE_GLOBAL_MSB 0x0204
+#define REG_ANALOGUE_GAIN_CODE_GLOBAL_LSB 0x0205
+#define REG_FINE_INTEGRATION_TIME         0x0200
+#define REG_COARSE_INTEGRATION_TIME       0x0202
+#define REG_COARSE_INTEGRATION_TIME_LSB   0x0203
+
+/* Mode select register */
+#define OV5642_REG_MODE_SELECT      0x0100
+#define OV5642_MODE_SELECT_STREAM     0x01   /* start streaming */
+#define OV5642_MODE_SELECT_SW_STANDBY 0x00   /* software standby */
+
+#define OV5642_BRIGHTNESS_DEGREE		15
+
+#define OV5642_DEFAULT_CLOCK_RATE  24000000
+
+#define OV5642_VGA_PREVIEW  1
+#define OV5642_XGA_PREVIEW  2
+#define OV5642_DEFAULT_PREVIEW  OV5642_XGA_PREVIEW
+#define OV5642_INIT_RETRY_COUNT  1
+#define OV5642_PREVIEW_RETRY_COUNT  1
+
+//#define USE_5M_PREVIEW
+#define ENABLE_ADJUSTMENT
+
+#define I2C_RETRY_COUNT 3
+struct reg_struct {
+  uint8_t pre_pll_clk_div;               /* 0x0305 */
+  uint8_t pll_multiplier_msb;            /* 0x0306 */
+  uint8_t pll_multiplier_lsb;            /* 0x0307 */
+  uint8_t vt_pix_clk_div;                /* 0x0301 */
+  uint8_t vt_sys_clk_div;                /* 0x0303 */
+  uint8_t op_pix_clk_div;                /* 0x0309 */
+  uint8_t op_sys_clk_div;                /* 0x030B */
+  uint8_t ccp_data_format_msb;           /* 0x0112 */
+  uint8_t ccp_data_format_lsb;           /* 0x0113 */
+  uint8_t x_output_size_msb;             /* 0x034C */
+  uint8_t x_output_size_lsb;             /* 0x034D */
+  uint8_t y_output_size_msb;             /* 0x034E */
+  uint8_t y_output_size_lsb;             /* 0x034F */
+  uint8_t x_even_inc;                    /* 0x0381 */
+  uint8_t x_odd_inc;                     /* 0x0383 */
+  uint8_t y_even_inc;                    /* 0x0385 */
+  uint8_t y_odd_inc;                     /* 0x0387 */
+  uint8_t binning_enable;                /* 0x3014 */
+  uint8_t frame_length_lines_msb;        /* 0x0340 */
+  uint8_t frame_length_lines_lsb;        /* 0x0341 */
+  uint8_t line_length_pck_msb;           /* 0x0342 */
+  uint8_t line_length_pck_lsb;           /* 0x0343 */
+  uint8_t shade_clk_enable ;             /* 0x30AC */
+  uint8_t sel_ccp;                       /* 0x30C4 */
+  uint8_t vpix;                          /* 0x3024 */
+  uint8_t clamp_on;                      /* 0x3015 */
+  uint8_t offset;                        /* 0x307E */
+  uint8_t ld_start;                      /* 0x3000 */
+  uint8_t ld_end;                        /* 0x3001 */
+  uint8_t sl_start;                      /* 0x3002 */
+  uint8_t sl_end;                        /* 0x3003 */
+  uint8_t rx_start;                      /* 0x3004 */
+  uint8_t s1_start;                      /* 0x3005 */
+  uint8_t s1_end;                        /* 0x3006 */
+  uint8_t s1s_start;                     /* 0x3007 */
+  uint8_t s1s_end;                       /* 0x3008 */
+  uint8_t s3_start;                      /* 0x3009 */
+  uint8_t s3_end;                        /* 0x300A */
+  uint8_t cmp_en_start;                  /* 0x300B */
+  uint8_t clp_sl_start;                  /* 0x300C */
+  uint8_t clp_sl_end;                    /* 0x300D */
+  uint8_t off_start;                     /* 0x300E */
+  uint8_t rmp_en_start;                  /* 0x300F */
+  uint8_t tx_start;                      /* 0x3010 */
+  uint8_t tx_end;                        /* 0x3011 */
+  uint8_t stx_width;                     /* 0x3012 */
+  uint8_t reg_3152_reserved;             /* 0x3152 */
+  uint8_t reg_315A_reserved;             /* 0x315A */
+  uint8_t analogue_gain_code_global_msb; /* 0x0204 */
+  uint8_t analogue_gain_code_global_lsb; /* 0x0205 */
+  uint8_t fine_integration_time;         /* 0x0200 */
+  uint8_t coarse_integration_time;       /* 0x0202 */
+  uint32_t  size_h;
+  uint32_t  blk_l;
+  uint32_t  size_w;
+  uint32_t  blk_p;
+};
+
+struct reg_struct ov5642_reg_pat[2] =  {
+  {	/* Preview */
+    0x06,  /* pre_pll_clk_div       REG=0x0305 */
+    0x00,  /* pll_multiplier_msb    REG=0x0306 */
+    0x88,  /* pll_multiplier_lsb    REG=0x0307 */
+    0x0a,  /* vt_pix_clk_div        REG=0x0301 */
+    0x01,  /* vt_sys_clk_div        REG=0x0303 */
+    0x0a,  /* op_pix_clk_div        REG=0x0309 */
+    0x01,  /* op_sys_clk_div        REG=0x030B */
+    0x0a,  /* ccp_data_format_msb   REG=0x0112 */
+    0x0a,  /* ccp_data_format_lsb   REG=0x0113 */
+    0x05,  /* x_output_size_msb     REG=0x034C */
+    0x10,  /* x_output_size_lsb     REG=0x034D */
+    0x03,  /* y_output_size_msb     REG=0x034E */
+    0xcc,  /* y_output_size_lsb     REG=0x034F */
+
+    /* enable binning for preview */
+    0x01,  /* x_even_inc             REG=0x0381 */
+    0x01,  /* x_odd_inc              REG=0x0383 */
+    0x01,  /* y_even_inc             REG=0x0385 */
+    0x03,  /* y_odd_inc              REG=0x0387 */
+    0x06,  /* binning_enable         REG=0x3014 */
+
+    0x03,  /* frame_length_lines_msb        REG=0x0340 */
+    0xde,  /* frame_length_lines_lsb        REG=0x0341 */
+    0x0a,  /* line_length_pck_msb           REG=0x0342 */
+    0xac,  /* line_length_pck_lsb           REG=0x0343 */
+    0x81,  /* shade_clk_enable              REG=0x30AC */
+    0x01,  /* sel_ccp                       REG=0x30C4 */
+    0x04,  /* vpix                          REG=0x3024 */
+    0x00,  /* clamp_on                      REG=0x3015 */
+    0x02,  /* offset                        REG=0x307E */
+    0x03,  /* ld_start                      REG=0x3000 */
+    0x9c,  /* ld_end                        REG=0x3001 */
+    0x02,  /* sl_start                      REG=0x3002 */
+    0x9e,  /* sl_end                        REG=0x3003 */
+    0x05,  /* rx_start                      REG=0x3004 */
+    0x0f,  /* s1_start                      REG=0x3005 */
+    0x24,  /* s1_end                        REG=0x3006 */
+    0x7c,  /* s1s_start                     REG=0x3007 */
+    0x9a,  /* s1s_end                       REG=0x3008 */
+    0x10,  /* s3_start                      REG=0x3009 */
+    0x14,  /* s3_end                        REG=0x300A */
+    0x10,  /* cmp_en_start                  REG=0x300B */
+    0x04,  /* clp_sl_start                  REG=0x300C */
+    0x26,  /* clp_sl_end                    REG=0x300D */
+    0x02,  /* off_start                     REG=0x300E */
+    0x0e,  /* rmp_en_start                  REG=0x300F */
+    0x30,  /* tx_start                      REG=0x3010 */
+    0x4e,  /* tx_end                        REG=0x3011 */
+    0x1E,  /* stx_width                     REG=0x3012 */
+    0x08,  /* reg_3152_reserved             REG=0x3152 */
+    0x10,  /* reg_315A_reserved             REG=0x315A */
+    0x00,  /* analogue_gain_code_global_msb REG=0x0204 */
+    0x80,  /* analogue_gain_code_global_lsb REG=0x0205 */
+    0x02,  /* fine_integration_time         REG=0x0200 */
+    0x03,  /* coarse_integration_time       REG=0x0202 */
+		972,
+		18,
+		1296,
+		1436
+  },
+  { /* Snapshot */
+    0x06,  /* pre_pll_clk_div               REG=0x0305 */
+    0x00,  /* pll_multiplier_msb            REG=0x0306 */
+    0x88,  /* pll_multiplier_lsb            REG=0x0307 */
+    0x0a,  /* vt_pix_clk_div                REG=0x0301 */
+    0x01,  /* vt_sys_clk_div                REG=0x0303 */
+    0x0a,  /* op_pix_clk_div                REG=0x0309 */
+    0x01,  /* op_sys_clk_div                REG=0x030B */
+    0x0a,  /* ccp_data_format_msb           REG=0x0112 */
+    0x0a,  /* ccp_data_format_lsb           REG=0x0113 */
+    0x0a,  /* x_output_size_msb             REG=0x034C */
+    0x30,  /* x_output_size_lsb             REG=0x034D */
+    0x07,  /* y_output_size_msb             REG=0x034E */
+    0xa8,  /* y_output_size_lsb             REG=0x034F */
+
+    /* disable binning for snapshot */
+    0x01,  /* x_even_inc                    REG=0x0381 */
+    0x01,  /* x_odd_inc                     REG=0x0383 */
+    0x01,  /* y_even_inc                    REG=0x0385 */
+    0x01,  /* y_odd_inc                     REG=0x0387 */
+    0x00,  /* binning_enable                REG=0x3014 */
+
+    //0x07,  /* frame_length_lines_msb        REG=0x0340 */
+    //0xb6,  /* frame_length_lines_lsb        REG=0x0341 */
+    //0x0a,  /* line_length_pck_msb           REG=0x0342 */
+    //0xac,  /* line_length_pck_lsb           REG=0x0343 */
+    0x07,  /* frame_length_lines_msb        REG=0x0340 */
+    0x98,  /* frame_length_lines_lsb        REG=0x0341 */
+    0x14,  /* line_length_pck_msb           REG=0x0342 */
+    0x40,  /* line_length_pck_lsb           REG=0x0343 */
+    0x81,  /* shade_clk_enable              REG=0x30AC */
+    0x01,  /* sel_ccp                       REG=0x30C4 */
+    0x04,  /* vpix                          REG=0x3024 */
+    0x00,  /* clamp_on                      REG=0x3015 */
+    0x02,  /* offset                        REG=0x307E */
+    0x03,  /* ld_start                      REG=0x3000 */
+    0x9c,  /* ld_end                        REG=0x3001 */
+    0x02,  /* sl_start                      REG=0x3002 */
+    0x9e,  /* sl_end                        REG=0x3003 */
+    0x05,  /* rx_start                      REG=0x3004 */
+    0x0f,  /* s1_start                      REG=0x3005 */
+    0x24,  /* s1_end                        REG=0x3006 */
+    0x7c,  /* s1s_start                     REG=0x3007 */
+    0x9a,  /* s1s_end                       REG=0x3008 */
+    0x10,  /* s3_start                      REG=0x3009 */
+    0x14,  /* s3_end                        REG=0x300A */
+    0x10,  /* cmp_en_start                  REG=0x300B */
+    0x04,  /* clp_sl_start                  REG=0x300C */
+    0x26,  /* clp_sl_end                    REG=0x300D */
+    0x02,  /* off_start                     REG=0x300E */
+    0x0e,  /* rmp_en_start                  REG=0x300F */
+    0x30,  /* tx_start                      REG=0x3010 */
+    0x4e,  /* tx_end                        REG=0x3011 */
+    0x1E,  /* stx_width                     REG=0x3012 */
+    0x08,  /* reg_3152_reserved             REG=0x3152 */
+    0x10,  /* reg_315A_reserved             REG=0x315A */
+    0x00,  /* analogue_gain_code_global_msb REG=0x0204 */
+    0x80,  /* analogue_gain_code_global_lsb REG=0x0205 */
+    0x02,  /* fine_integration_time         REG=0x0200 */
+    0x03,  /* coarse_integration_time       REG=0x0202 */
+		1960,
+		14,
+		2608,
+		124
+	}
+};
+
+struct ov5642_work {
+	struct work_struct work;
+};
+static struct ov5642_work *ov5642_sensorw;
+static struct i2c_client *ov5642_client;
+
+struct ov5642_ctrl {
+	const struct msm_camera_sensor_info *sensordata;
+
+	int sensormode;
+	uint32_t fps_divider; /* init to 1 * 0x00000400 */
+	uint32_t pict_fps_divider; /* init to 1 * 0x00000400 */
+
+	uint16_t curr_lens_pos;
+	uint16_t init_curr_lens_pos;
+	uint16_t my_reg_gain;
+	uint32_t my_reg_line_count;
+
+	enum msm_s_resolution prev_res;
+	enum msm_s_resolution pict_res;
+	enum msm_s_resolution curr_res;
+	enum msm_s_test_mode  set_test;
+};
+
+struct ov5642_i2c_reg_conf {
+	unsigned short waddr;
+	unsigned char  bdata;
+};
+
+CAM_REG_ADDR_VAL_TYPE	cam_sw_ov5642_resets_setup[]=
+{
+{0x3103, 0x93},
+{0x3008, 0x82},
+{0x3017, 0x7f},
+{0x3018, 0xfc},
+{0x3810, 0xc2},
+{0x3615, 0xf0},
+{0x3000, 0x00},
+{0x3001, 0x00},
+{0x3002, 0x00},
+{0x3003, 0x00},
+{0x3000, 0xf8},
+{0x3001, 0x48},
+{0x3002, 0x5c},
+{0x3003, 0x02},
+{0x3004, 0x07},
+{0x3005, 0xb7},
+{0x3006, 0x43},
+{0x3007, 0x37},
+{0x3011, 0x08},
+{0x3010, 0x00},
+{0x460c, 0x22},
+{0x3815, 0x04},
+{0x370c, 0xa0},
+{0x3602, 0xfc},
+{0x3612, 0xff},
+{0x3634, 0xc0},
+{0x3613, 0x00},
+{0x3605, 0x7c},
+{0x3621, 0x09},
+{0x3622, 0x60},
+{0x3604, 0x40},
+{0x3603, 0xa7},
+{0x3603, 0x27},
+{0x4000, 0x21},
+{0x401d, 0x22},
+{0x3600, 0x54},
+{0x3605, 0x04},
+{0x3606, 0x3f},
+{0x3c01, 0x80},
+{0x5000, 0x4f},
+{0x5020, 0x04},
+{0x5181, 0x79},
+{0x5182, 0x00},
+{0x5185, 0x22},
+{0x5197, 0x01},
+{0x5001, 0xff},
+{0x5500, 0x0a},
+{0x5504, 0x00},
+{0x5505, 0x7f},
+{0x5080, 0x08},
+{0x300e, 0x18},
+{0x4610, 0x00},
+{0x471d, 0x05},
+{0x4708, 0x06},
+{0x3808, 0x02},
+{0x3809, 0x80},
+{0x380a, 0x01},
+{0x380b, 0xe0},
+{0x380e, 0x07},
+{0x380f, 0xd0},
+{0x501f, 0x00},
+{0x5000, 0x4f},
+{0x4300, 0x30},
+{0x3503, 0x07},
+{0x3501, 0x73},
+{0x3502, 0x80},
+{0x350b, 0x00},
+{0x3503, 0x07},
+{0x3824, 0x11},
+{0x3501, 0x1e},
+{0x3502, 0x80},
+{0x350b, 0x7f},
+{0x380c, 0x0c},
+{0x380d, 0x80},
+{0x380e, 0x03},
+{0x380f, 0xe8},
+{0x3a0d, 0x04},
+{0x3a0e, 0x03},
+{0x3818, 0xc1},
+{0x3705, 0xdb},
+{0x370a, 0x81},
+{0x3801, 0x80},
+{0x3621, 0x87},
+{0x3801, 0x50},
+{0x3803, 0x08},
+{0x3827, 0x08},
+{0x3810, 0x40},
+{0x3804, 0x05},
+{0x3805, 0x00},
+{0x5682, 0x05},
+{0x5683, 0x00},
+{0x3806, 0x03},
+{0x3807, 0xc0},
+{0x5686, 0x03},
+{0x5687, 0xbc},
+{0x3a00, 0x78},
+{0x3a1a, 0x05},
+{0x3a13, 0x30},
+{0x3a18, 0x00},
+{0x3a19, 0x7c},
+{0x3a08, 0x12},
+{0x3a09, 0xc0},
+{0x3a0a, 0x0f},
+{0x3a0b, 0xa0},
+{0x3004, 0xff},
+{0x350c, 0x07},
+{0x350d, 0xd0},
+{0x3500, 0x00},
+{0x3501, 0x00},
+{0x3502, 0x00},
+{0x350a, 0x00},
+{0x350b, 0x00},
+{0x3503, 0x00},
+{0x528a, 0x02},
+{0x528b, 0x04},
+{0x528c, 0x08},
+{0x528d, 0x08},
+{0x528e, 0x08},
+{0x528f, 0x10},
+{0x5290, 0x10},
+{0x5292, 0x00},
+{0x5293, 0x02},
+{0x5294, 0x00},
+{0x5295, 0x02},
+{0x5296, 0x00},
+{0x5297, 0x02},
+{0x5298, 0x00},
+{0x5299, 0x02},
+{0x529a, 0x00},
+{0x529b, 0x02},
+{0x529c, 0x00},
+{0x529d, 0x02},
+{0x529e, 0x00},
+{0x529f, 0x02},
+{0x3a0f, 0x3c},
+{0x3a10, 0x30},
+{0x3a1b, 0x3c},
+{0x3a1e, 0x30},
+{0x3a11, 0x70},
+{0x3a1f, 0x10},
+{0x3030, 0x2b},
+{0x3a02, 0x00},
+{0x3a03, 0x7d},
+{0x3a04, 0x00},
+{0x3a14, 0x00},
+{0x3a15, 0x7d},
+{0x3a16, 0x00},
+{0x3a00, 0x78},
+{0x3a08, 0x09},
+{0x3a09, 0x60},
+{0x3a0a, 0x07},
+{0x3a0b, 0xd0},
+{0x3a0d, 0x08},
+{0x3a0e, 0x06},
+{0x5193, 0x70},
+{0x589b, 0x04},
+{0x589a, 0xc5},
+{0x4001, 0x42},
+{0x401c, 0x04},
+//de-nois, Y
+{0x528a, 0x08},
+{0x528b, 0x10},
+{0x528c, 0x20},
+{0x528d, 0x30},
+{0x528e, 0x50},
+{0x528f, 0xf0},
+{0x5290, 0xf0},
+//de-nois, UV
+{0x5292, 0x00},
+{0x5293, 0x10},
+{0x5294, 0x00},
+{0x5295, 0x20},
+{0x5296, 0x00},
+{0x5297, 0x40},
+{0x5298, 0x00},
+{0x5299, 0x60},
+{0x529a, 0x01},
+{0x529b, 0x80},
+{0x529c, 0x01},
+{0x529d, 0xa0},
+{0x529e, 0x01},
+{0x529f, 0xf8},
+{0x5282, 0x00},
+//;end, de, noise
+           
+{0x5300, 0x00},
+{0x5301, 0x20},
+{0x5302, 0x00},
+{0x5303, 0x7c},
+{0x530c, 0x00},
+{0x530d, 0x0c},
+{0x530e, 0x20},
+{0x530f, 0x80},
+{0x5310, 0x20},
+{0x5311, 0x80},
+{0x5308, 0x20},
+{0x5309, 0x40},
+{0x5304, 0x00},
+{0x5305, 0x30},
+{0x5306, 0x00},
+{0x5307, 0x80},
+{0x5314, 0x08},
+{0x5315, 0x20},
+{0x5319, 0x30},
+{0x5316, 0x10},
+{0x5317, 0x08},
+{0x5318, 0x02},
+{0x5380, 0x01},
+{0x5381, 0x00},
+{0x5382, 0x00},
+{0x5383, 0x4e},
+{0x5384, 0x00},
+{0x5385, 0x0f},
+{0x5386, 0x00},
+{0x5387, 0x00},
+{0x5388, 0x01},
+{0x5389, 0x15},
+{0x538a, 0x00},
+{0x538b, 0x31},
+{0x538c, 0x00},
+{0x538d, 0x00},
+{0x538e, 0x00},
+{0x538f, 0x0f},
+{0x5390, 0x00},
+{0x5391, 0xab},
+{0x5392, 0x00},
+{0x5393, 0xa2},
+{0x5394, 0x08},
+{0x5480, 0x14},
+{0x5481, 0x21},
+{0x5482, 0x36},
+{0x5483, 0x57},
+{0x5484, 0x65},
+{0x5485, 0x71},
+{0x5486, 0x7d},
+{0x5487, 0x87},
+{0x5488, 0x91},
+{0x5489, 0x9a},
+{0x548a, 0xaa},
+{0x548b, 0xb8},
+{0x548c, 0xcd},
+{0x548d, 0xdd},
+{0x548e, 0xea},
+{0x548f, 0x10},
+{0x5490, 0x05},
+{0x5491, 0x00},
+{0x5492, 0x04},
+{0x5493, 0x20},
+{0x5494, 0x03},
+{0x5495, 0x60},
+{0x5496, 0x02},
+{0x5497, 0xb8},
+{0x5498, 0x02},
+{0x5499, 0x86},
+{0x549a, 0x02},
+{0x549b, 0x5b},
+{0x549c, 0x02},
+{0x549d, 0x3b},
+{0x549e, 0x02},
+{0x549f, 0x1c},
+{0x54a0, 0x02},
+{0x54a1, 0x04},
+{0x54a2, 0x01},
+{0x54a3, 0xed},
+{0x54a4, 0x01},
+{0x54a5, 0xc5},
+{0x54a6, 0x01},
+{0x54a7, 0xa5},
+{0x54a8, 0x01},
+{0x54a9, 0x6c},
+{0x54aa, 0x01},
+{0x54ab, 0x41},
+{0x54ac, 0x01},
+{0x54ad, 0x20},
+{0x54ae, 0x00},
+{0x54af, 0x16},
+{0x3406, 0x00},
+{0x5192, 0x04},
+{0x5191, 0xf8},
+{0x5193, 0x70},
+{0x5194, 0xf0},
+{0x5195, 0xf0},
+{0x518d, 0x3d},
+{0x518f, 0x54},
+{0x518e, 0x3d},
+{0x5190, 0x54},
+{0x518b, 0xa8},
+{0x518c, 0xa8},
+{0x5187, 0x18},
+{0x5188, 0x18},
+{0x5189, 0x6e},
+{0x518a, 0x68},
+{0x5186, 0x1c},
+{0x5181, 0x50},
+{0x5184, 0x25},
+{0x5182, 0x11},
+{0x5183, 0x14},
+{0x5184, 0x25},
+{0x5185, 0x24},
+{0x5025, 0x82},
+{0x3a0f, 0x7e},
+{0x3a10, 0x72},
+{0x3a1b, 0x80},
+{0x3a1e, 0x70},
+{0x3a11, 0xd0},
+{0x3a1f, 0x40},
+{0x5583, 0x40},
+{0x5584, 0x40},
+{0x5580, 0x02},
+{0x5000, 0xcf},
+{0x5800, 0x27},
+{0x5801, 0x19},
+{0x5802, 0x12},
+{0x5803, 0x0f},
+{0x5804, 0x10},
+{0x5805, 0x15},
+{0x5806, 0x1e},
+{0x5807, 0x2f},
+{0x5808, 0x15},
+{0x5809, 0x0d},
+{0x580a, 0x0a},
+{0x580b, 0x09},
+{0x580c, 0x0a},
+{0x580d, 0x0c},
+{0x580e, 0x12},
+{0x580f, 0x19},
+{0x5810, 0x0b},
+{0x5811, 0x07},
+{0x5812, 0x04},
+{0x5813, 0x03},
+{0x5814, 0x03},
+{0x5815, 0x06},
+{0x5816, 0x0a},
+{0x5817, 0x0f},
+{0x5818, 0x0a},
+{0x5819, 0x05},
+{0x581a, 0x01},
+{0x581b, 0x00},
+{0x581c, 0x00},
+{0x581d, 0x03},
+{0x581e, 0x08},
+{0x581f, 0x0c},
+{0x5820, 0x0a},
+{0x5821, 0x05},
+{0x5822, 0x01},
+{0x5823, 0x00},
+{0x5824, 0x00},
+{0x5825, 0x03},
+{0x5826, 0x08},
+{0x5827, 0x0c},
+{0x5828, 0x0e},
+{0x5829, 0x08},
+{0x582a, 0x06},
+{0x582b, 0x04},
+{0x582c, 0x05},
+{0x582d, 0x07},
+{0x582e, 0x0b},
+{0x582f, 0x12},
+{0x5830, 0x18},
+{0x5831, 0x10},
+{0x5832, 0x0c},
+{0x5833, 0x0a},
+{0x5834, 0x0b},
+{0x5835, 0x0e},
+{0x5836, 0x15},
+{0x5837, 0x19},
+{0x5838, 0x32},
+{0x5839, 0x1f},
+{0x583a, 0x18},
+{0x583b, 0x16},
+{0x583c, 0x17},
+{0x583d, 0x1e},
+{0x583e, 0x26},
+{0x583f, 0x53},
+{0x5840, 0x10},
+{0x5841, 0x0f},
+{0x5842, 0x0d},
+{0x5843, 0x0c},
+{0x5844, 0x0e},
+{0x5845, 0x09},
+{0x5846, 0x11},
+{0x5847, 0x10},
+{0x5848, 0x10},
+{0x5849, 0x10},
+{0x584a, 0x10},
+{0x584b, 0x0e},
+{0x584c, 0x10},
+{0x584d, 0x10},
+{0x584e, 0x11},
+{0x584f, 0x10},
+{0x5850, 0x0f},
+{0x5851, 0x0c},
+{0x5852, 0x0f},
+{0x5853, 0x10},
+{0x5854, 0x10},
+{0x5855, 0x0f},
+{0x5856, 0x0e},
+{0x5857, 0x0b},
+{0x5858, 0x10},
+{0x5859, 0x0d},
+{0x585a, 0x0d},
+{0x585b, 0x0c},
+{0x585c, 0x0c},
+{0x585d, 0x0c},
+{0x585e, 0x0b},
+{0x585f, 0x0c},
+{0x5860, 0x0c},
+{0x5861, 0x0c},
+{0x5862, 0x0d},
+{0x5863, 0x08},
+{0x5864, 0x11},
+{0x5865, 0x18},
+{0x5866, 0x18},
+{0x5867, 0x19},
+{0x5868, 0x17},
+{0x5869, 0x19},
+{0x586a, 0x16},
+{0x586b, 0x13},
+{0x586c, 0x13},
+{0x586d, 0x12},
+{0x586e, 0x13},
+{0x586f, 0x16},
+{0x5870, 0x14},
+{0x5871, 0x12},
+{0x5872, 0x10},
+{0x5873, 0x11},
+{0x5874, 0x11},
+{0x5875, 0x16},
+{0x5876, 0x14},
+{0x5877, 0x11},
+{0x5878, 0x10},
+{0x5879, 0x0f},
+{0x587a, 0x10},
+{0x587b, 0x14},
+{0x587c, 0x13},
+{0x587d, 0x12},
+{0x587e, 0x11},
+{0x587f, 0x11},
+{0x5880, 0x12},
+{0x5881, 0x15},
+{0x5882, 0x14},
+{0x5883, 0x15},
+{0x5884, 0x15},
+{0x5885, 0x15},
+{0x5886, 0x13},
+{0x5887, 0x17},
+{0x3710, 0x10},
+{0x3632, 0x51},
+{0x3702, 0x10},
+{0x3703, 0xb2},
+{0x3704, 0x18},
+{0x370b, 0x40},
+{0x370d, 0x03},
+{0x3631, 0x01},
+{0x3632, 0x52},
+{0x3606, 0x24},
+{0x3620, 0x96},
+{0x5785, 0x07},
+{0x3a13, 0x30},
+{0x3600, 0x52},
+{0x3604, 0x48},
+{0x3606, 0x1b},
+{0x370d, 0x0b},
+{0x370f, 0xc0},
+{0x3709, 0x01},
+{0x3823, 0x00},
+{0x5007, 0x00},
+{0x5009, 0x00},
+{0x5011, 0x00},
+{0x5013, 0x00},
+{0x519e, 0x00},
+{0x5086, 0x00},
+{0x5087, 0x00},
+{0x5088, 0x00},
+{0x5089, 0x00},
+{0x302b, 0x00},             
+//Lens, C0xorrection
+//G      
+{0x5800, 0x45},
+{0x5801, 0x2b},
+{0x5802, 0x21},
+{0x5803, 0x1d},
+{0x5804, 0x1e},
+{0x5805, 0x22},
+{0x5806, 0x30},
+{0x5807, 0x4b},
+{0x5808, 0x21},
+{0x5809, 0x19},
+{0x580a, 0x14},
+{0x580b, 0x11},
+{0x580c, 0x12},
+{0x580d, 0x14},
+{0x580e, 0x1a},
+{0x580f, 0x22},
+{0x5810, 0x15},
+{0x5811, 0xe}, 
+{0x5812, 0x9}, 
+{0x5813, 0x5}, 
+{0x5814, 0x6}, 
+{0x5815, 0x9}, 
+{0x5816, 0xf}, 
+{0x5817, 0x14},
+{0x5818, 0x10},
+{0x5819, 0x8}, 
+{0x581a, 0x3}, 
+{0x581b, 0x0}, 
+{0x581c, 0x0}, 
+{0x581d, 0x3}, 
+{0x581e, 0xa}, 
+{0x581f, 0xf}, 
+{0x5820, 0xf}, 
+{0x5821, 0x8}, 
+{0x5822, 0x2}, 
+{0x5823, 0x0}, 
+{0x5824, 0x0}, 
+{0x5825, 0x3}, 
+{0x5826, 0x9}, 
+{0x5827, 0xe}, 
+{0x5828, 0x13},
+{0x5829, 0xd}, 
+{0x582a, 0x7}, 
+{0x582b, 0x4}, 
+{0x582c, 0x4}, 
+{0x582d, 0x8}, 
+{0x582e, 0xd}, 
+{0x582f, 0x12},
+{0x5830, 0x1c},
+{0x5831, 0x17},
+{0x5832, 0x11},
+{0x5833, 0xe}, 
+{0x5834, 0xe}, 
+{0x5835, 0x11},
+{0x5836, 0x17},
+{0x5837, 0x1c},
+{0x5838, 0x3a},
+{0x5839, 0x28},
+{0x583a, 0x20},
+{0x583b, 0x1c},
+{0x583c, 0x1d},
+{0x583d, 0x20},
+{0x583e, 0x2a},
+{0x583f, 0x43},
+//;B 
+{0x5840, 0xe}, 
+{0x5841, 0x8}, 
+{0x5842, 0x8}, 
+{0x5843, 0x9}, 
+{0x5844, 0x8}, 
+{0x5845, 0x8}, 
+{0x5846, 0xe}, 
+{0x5847, 0xd}, 
+{0x5848, 0xe}, 
+{0x5849, 0xf}, 
+{0x584a, 0xe}, 
+{0x584b, 0x9}, 
+{0x584c, 0xe}, 
+{0x584d, 0xe}, 
+{0x584e, 0x10},
+{0x584f, 0x10},
+{0x5850, 0xe}, 
+{0x5851, 0x9}, 
+{0x5852, 0xe}, 
+{0x5853, 0xd}, 
+{0x5854, 0x10},
+{0x5855, 0x10},
+{0x5856, 0xf}, 
+{0x5857, 0x9}, 
+{0x5858, 0xc}, 
+{0x5859, 0xc}, 
+{0x585a, 0xf}, 
+{0x585b, 0xd}, 
+{0x585c, 0xe}, 
+{0x585d, 0x7}, 
+{0x585e, 0xb}, 
+{0x585f, 0xe}, 
+{0x5860, 0xd}, 
+{0x5861, 0xc}, 
+{0x5862, 0xd}, 
+{0x5863, 0xb}, 
+//R      
+{0x5864, 0x11},
+{0x5865, 0x1a},
+{0x5866, 0x1c},
+{0x5867, 0x1b},
+{0x5868, 0x1a},
+{0x5869, 0x10},
+{0x586a, 0x1e},
+{0x586b, 0x18},
+{0x586c, 0x16},
+{0x586d, 0x16},
+{0x586e, 0x19},
+{0x586f, 0x1f},
+{0x5870, 0x1c},
+{0x5871, 0x14},
+{0x5872, 0x10},
+{0x5873, 0x10},
+{0x5874, 0x15},
+{0x5875, 0x1f},
+{0x5876, 0x1d},
+{0x5877, 0x14},
+{0x5878, 0x10},
+{0x5879, 0x10},
+{0x587a, 0x14},
+{0x587b, 0x1f},
+{0x587c, 0x1f},
+{0x587d, 0x19},
+{0x587e, 0x16},
+{0x587f, 0x17},
+{0x5880, 0x19},
+{0x5881, 0x1f},
+{0x5882, 0x14},
+{0x5883, 0x19},
+{0x5884, 0x1d},
+{0x5885, 0x1c},
+{0x5886, 0x1a},
+{0x5887, 0x14},      
+//CTX    
+{0x5380, 0x1}, 
+{0x5381, 0x0}, 
+{0x5382, 0x0}, 
+{0x5383, 0x0}, 
+{0x5384, 0x0}, 
+{0x5385, 0x0}, 
+{0x5386, 0x0}, 
+{0x5387, 0x0}, 
+{0x5388, 0x1}, 
+{0x5389, 0x48},
+{0x538a, 0x0}, 
+{0x538b, 0x4b}, 
+{0x538c, 0x0}, 
+{0x538d, 0x0}, 
+{0x538e, 0x0}, 
+{0x538f, 0xc},
+{0x5390, 0x1}, 
+{0x5391, 0x8}, 
+{0x5392, 0x0}, 
+{0x5393, 0xa0}, 
+{0x5394, 0x8}, 
+//AWB    
+{0x5180, 0xff},
+{0x5181, 0x50},
+{0x5182, 0x11},
+{0x5183, 0x14},
+{0x5184, 0x25},
+{0x5185, 0x24},
+{0x5186, 0x14},
+{0x5187, 0x14},
+{0x5188, 0x14},
+{0x5189, 0x66},
+{0x518a, 0x5e},
+{0x518b, 0xe5},
+{0x518c, 0xa8},
+{0x518d, 0x39},
+{0x518e, 0x34},
+{0x518f, 0x52},
+{0x5190, 0x53},
+{0x5191, 0xf8},
+{0x5192, 0x4}, 
+{0x5193, 0x70},
+{0x5194, 0xf0},
+{0x5195, 0xf0},
+{0x5196, 0x3}, 
+{0x5197, 0x1}, 
+{0x5198, 0x6}, 
+{0x5199, 0x0}, 
+{0x519a, 0x4}, 
+{0x519b, 0x0}, 
+{0x519c, 0x5}, 
+{0x519d, 0xca},
+{0x519e, 0x0},         
+{0x3030, 0x2b}, //bp_regular
+};
+
+CAM_REG_ADDR_VAL_TYPE	cam_initial_xga_setup[]=
+{
+//1024x768_YUV_30fps initial preview
+//0x3010:0x10 Frame rate: 15 fps
+{0x3103, 0x93},
+{0x3008, 0x82},
+{0x3017, 0x7f},
+{0x3018, 0xfc},
+{0x3615, 0xf0},
+{0x3000, 0x00},
+{0x3001, 0x00},
+{0x3002, 0x5c},
+{0x3003, 0x00},
+{0x3004, 0xff},
+{0x3005, 0xff},
+{0x3006, 0x43},
+{0x3007, 0x37},
+{0x3011, 0x09},
+{0x3012, 0x02},
+{0x3010, 0x10},
+{0x460c, 0x20},
+{0x3815, 0x04},
+{0x370c, 0xa0},
+{0x3602, 0xfc},
+{0x3612, 0xff},
+{0x3634, 0xc0},
+{0x3613, 0x00},
+{0x3605, 0x7c},
+{0x3621, 0x09},
+{0x3622, 0x60},
+{0x3604, 0x40},
+{0x3603, 0xa7},
+{0x3603, 0x27},
+{0x4000, 0x21},
+{0x401d, 0x22},
+{0x3600, 0x54},
+{0x3605, 0x04},
+{0x3606, 0x3f},
+{0x3c01, 0x80},
+{0x5000, 0x4f},
+{0x5020, 0x04},
+{0x5181, 0x79},
+{0x5182, 0x00},
+{0x5185, 0x22},
+{0x5197, 0x01},
+{0x5001, 0xff},
+{0x5500, 0x0a},
+{0x5504, 0x00},
+{0x5505, 0x7f},
+{0x5080, 0x08},
+{0x300e, 0x18},
+{0x4610, 0x00},
+{0x471d, 0x05},
+{0x4708, 0x06},
+{0x3808, 0x02},
+{0x3809, 0x80},
+{0x380a, 0x01},
+{0x380b, 0xe0},
+{0x380e, 0x07},
+{0x380f, 0xd0},
+{0x501f, 0x00},
+{0x5000, 0x4f},
+{0x4300, 0x30},
+{0x3503, 0x07},
+{0x3501, 0x73},
+{0x3502, 0x80},
+{0x350b, 0x00},
+{0x3503, 0x07},
+{0x3824, 0x11},
+{0x3825, 0xb0},
+{0x3501, 0x1e},
+{0x3502, 0x80},
+{0x350b, 0x7f},
+{0x380c, 0x07},
+{0x380d, 0x2a},
+{0x380e, 0x03},
+{0x380f, 0xe8},
+{0x3a0d, 0x04},
+{0x3a0e, 0x03},
+{0x3818, 0xc1},
+{0x3705, 0xdb},
+{0x370a, 0x81},
+{0x3801, 0x80},
+{0x3621, 0xc7},
+{0x3801, 0x50},
+{0x3803, 0x08},
+{0x3827, 0x08},
+{0x3810, 0x80},
+{0x3804, 0x05},
+{0x3805, 0x00},
+{0x5682, 0x05},
+{0x5683, 0x00},
+{0x3806, 0x03},
+{0x3807, 0xc0},
+{0x5686, 0x03},
+{0x5687, 0xbc},
+{0x3a00, 0x78},
+{0x3a1a, 0x05},
+{0x3a13, 0x30},
+{0x3a18, 0x00},
+{0x3a19, 0x7c},
+{0x3a08, 0x12},
+{0x3a09, 0xc0},
+{0x3a0a, 0x0f},
+{0x3a0b, 0xa0},
+{0x350c, 0x07},
+{0x350d, 0xd0},
+{0x3500, 0x00},
+{0x3501, 0x00},
+{0x3502, 0x00},
+{0x350a, 0x00},
+{0x350b, 0x00},
+{0x3503, 0x00},
+{0x528a, 0x02},
+{0x528b, 0x04},
+{0x528c, 0x08},
+{0x528d, 0x08},
+{0x528e, 0x08},
+{0x528f, 0x10},
+{0x5290, 0x10},
+{0x5292, 0x00},
+{0x5293, 0x02},
+{0x5294, 0x00},
+{0x5295, 0x02},
+{0x5296, 0x00},
+{0x5297, 0x02},
+{0x5298, 0x00},
+{0x5299, 0x02},
+{0x529a, 0x00},
+{0x529b, 0x02},
+{0x529c, 0x00},
+{0x529d, 0x02},
+{0x529e, 0x00},
+{0x529f, 0x02},
+{0x3a0f, 0x3c},
+{0x3a10, 0x30},
+{0x3a1b, 0x3c},
+{0x3a1e, 0x30},
+{0x3a11, 0x70},
+{0x3a1f, 0x10},
+{0x3030, 0x2b},
+{0x3a02, 0x00},
+{0x3a03, 0x7d},
+{0x3a04, 0x00},
+{0x3a14, 0x00},
+{0x3a15, 0x7d},
+{0x3a16, 0x00},
+{0x3a00, 0x78},
+{0x3a08, 0x12},
+{0x3a09, 0xc0},
+{0x3a0a, 0x0f},
+{0x3a0b, 0xa0},
+{0x3a0d, 0x04},
+{0x3a0e, 0x03},
+{0x5193, 0x70},
+{0x589b, 0x04},
+{0x589a, 0xc5},
+{0x4001, 0x42},
+{0x401c, 0x04},
+{0x528a, 0x01},
+{0x528b, 0x04},
+{0x528c, 0x08},
+{0x528d, 0x10},
+{0x528e, 0x20},
+{0x528f, 0x28},
+{0x5290, 0x30},
+{0x5292, 0x00},
+{0x5293, 0x01},
+{0x5294, 0x00},
+{0x5295, 0x04},
+{0x5296, 0x00},
+{0x5297, 0x08},
+{0x5298, 0x00},
+{0x5299, 0x10},
+{0x529a, 0x00},
+{0x529b, 0x20},
+{0x529c, 0x00},
+{0x529d, 0x28},
+{0x529e, 0x00},
+{0x529f, 0x30},
+{0x5282, 0x00},
+{0x5300, 0x00},
+{0x5301, 0x20},
+{0x5302, 0x00},
+{0x5303, 0x7c},
+{0x530c, 0x00},
+{0x530d, 0x0c},
+{0x530e, 0x20},
+{0x530f, 0x80},
+{0x5310, 0x20},
+{0x5311, 0x80},
+{0x5308, 0x20},
+{0x5309, 0x40},
+{0x5304, 0x00},
+{0x5305, 0x30},
+{0x5306, 0x00},
+{0x5307, 0x80},
+{0x5314, 0x08},
+{0x5315, 0x20},
+{0x5319, 0x30},
+{0x5316, 0x10},
+{0x5317, 0x00},
+{0x5318, 0x02},
+{0x5380, 0x01},
+{0x5381, 0x00},
+{0x5382, 0x00},
+{0x5383, 0x4e},
+{0x5384, 0x00},
+{0x5385, 0x0f},
+{0x5386, 0x00},
+{0x5387, 0x00},
+{0x5388, 0x01},
+{0x5389, 0x15},
+{0x538a, 0x00},
+{0x538b, 0x31},
+{0x538c, 0x00},
+{0x538d, 0x00},
+{0x538e, 0x00},
+{0x538f, 0x0f},
+{0x5390, 0x00},
+{0x5391, 0xab},
+{0x5392, 0x00},
+{0x5393, 0xa2},
+{0x5394, 0x08},
+{0x5480, 0x14},
+{0x5481, 0x21},
+{0x5482, 0x36},
+{0x5483, 0x57},
+{0x5484, 0x65},
+{0x5485, 0x71},
+{0x5486, 0x7d},
+{0x5487, 0x87},
+{0x5488, 0x91},
+{0x5489, 0x9a},
+{0x548a, 0xaa},
+{0x548b, 0xb8},
+{0x548c, 0xcd},
+{0x548d, 0xdd},
+{0x548e, 0xea},
+{0x548f, 0x1d},
+{0x5490, 0x05},
+{0x5491, 0x00},
+{0x5492, 0x04},
+{0x5493, 0x20},
+{0x5494, 0x03},
+{0x5495, 0x60},
+{0x5496, 0x02},
+{0x5497, 0xb8},
+{0x5498, 0x02},
+{0x5499, 0x86},
+{0x549a, 0x02},
+{0x549b, 0x5b},
+{0x549c, 0x02},
+{0x549d, 0x3b},
+{0x549e, 0x02},
+{0x549f, 0x1c},
+{0x54a0, 0x02},
+{0x54a1, 0x04},
+{0x54a2, 0x01},
+{0x54a3, 0xed},
+{0x54a4, 0x01},
+{0x54a5, 0xc5},
+{0x54a6, 0x01},
+{0x54a7, 0xa5},
+{0x54a8, 0x01},
+{0x54a9, 0x6c},
+{0x54aa, 0x01},
+{0x54ab, 0x41},
+{0x54ac, 0x01},
+{0x54ad, 0x20},
+{0x54ae, 0x00},
+{0x54af, 0x16},
+{0x54b0, 0x01},
+{0x54b1, 0x20},
+{0x54b2, 0x00},
+{0x54b3, 0x10},
+{0x54b4, 0x00},
+{0x54b5, 0xf0},
+{0x54b6, 0x00},
+{0x54b7, 0xdf},
+{0x5402, 0x3f},
+{0x5403, 0x00},
+{0x3406, 0x00},
+{0x5180, 0xff},
+{0x5181, 0x52},
+{0x5182, 0x11},
+{0x5183, 0x14},
+{0x5184, 0x25},
+{0x5185, 0x24},
+{0x5186, 0x06},
+{0x5187, 0x08},
+{0x5188, 0x08},
+{0x5189, 0x7c},
+{0x518a, 0x60},
+{0x518b, 0xb2},
+{0x518c, 0xb2},
+{0x518d, 0x44},
+{0x518e, 0x3d},
+{0x518f, 0x58},
+{0x5190, 0x46},
+{0x5191, 0xf8},
+{0x5192, 0x04},
+{0x5193, 0x70},
+{0x5194, 0xf0},
+{0x5195, 0xf0},
+{0x5196, 0x03},
+{0x5197, 0x01},
+{0x5198, 0x04},
+{0x5199, 0x12},
+{0x519a, 0x04},
+{0x519b, 0x00},
+{0x519c, 0x06},
+{0x519d, 0x82},
+{0x519e, 0x00},
+{0x5025, 0x80},
+{0x3a0f, 0x38},
+{0x3a10, 0x30},
+{0x3a1b, 0x3a},
+{0x3a1e, 0x2e},
+{0x3a11, 0x60},
+{0x3a1f, 0x10},
+{0x5688, 0xa6},
+{0x5689, 0x6a},
+{0x568a, 0xea},
+{0x568b, 0xae},
+{0x568c, 0xa6},
+{0x568d, 0x6a},
+{0x568e, 0x62},
+{0x568f, 0x26},
+{0x5583, 0x40},
+{0x5584, 0x40},
+{0x5580, 0x02},
+{0x5000, 0xcf},
+{0x5800, 0x27},
+{0x5801, 0x19},
+{0x5802, 0x12},
+{0x5803, 0x0f},
+{0x5804, 0x10},
+{0x5805, 0x15},
+{0x5806, 0x1e},
+{0x5807, 0x2f},
+{0x5808, 0x15},
+{0x5809, 0x0d},
+{0x580a, 0x0a},
+{0x580b, 0x09},
+{0x580c, 0x0a},
+{0x580d, 0x0c},
+{0x580e, 0x12},
+{0x580f, 0x19},
+{0x5810, 0x0b},
+{0x5811, 0x07},
+{0x5812, 0x04},
+{0x5813, 0x03},
+{0x5814, 0x03},
+{0x5815, 0x06},
+{0x5816, 0x0a},
+{0x5817, 0x0f},
+{0x5818, 0x0a},
+{0x5819, 0x05},
+{0x581a, 0x01},
+{0x581b, 0x00},
+{0x581c, 0x00},
+{0x581d, 0x03},
+{0x581e, 0x08},
+{0x581f, 0x0c},
+{0x5820, 0x0a},
+{0x5821, 0x05},
+{0x5822, 0x01},
+{0x5823, 0x00},
+{0x5824, 0x00},
+{0x5825, 0x03},
+{0x5826, 0x08},
+{0x5827, 0x0c},
+{0x5828, 0x0e},
+{0x5829, 0x08},
+{0x582a, 0x06},
+{0x582b, 0x04},
+{0x582c, 0x05},
+{0x582d, 0x07},
+{0x582e, 0x0b},
+{0x582f, 0x12},
+{0x5830, 0x18},
+{0x5831, 0x10},
+{0x5832, 0x0c},
+{0x5833, 0x0a},
+{0x5834, 0x0b},
+{0x5835, 0x0e},
+{0x5836, 0x15},
+{0x5837, 0x19},
+{0x5838, 0x32},
+{0x5839, 0x1f},
+{0x583a, 0x18},
+{0x583b, 0x16},
+{0x583c, 0x17},
+{0x583d, 0x1e},
+{0x583e, 0x26},
+{0x583f, 0x53},
+{0x5840, 0x10},
+{0x5841, 0x0f},
+{0x5842, 0x0d},
+{0x5843, 0x0c},
+{0x5844, 0x0e},
+{0x5845, 0x09},
+{0x5846, 0x11},
+{0x5847, 0x10},
+{0x5848, 0x10},
+{0x5849, 0x10},
+{0x584a, 0x10},
+{0x584b, 0x0e},
+{0x584c, 0x10},
+{0x584d, 0x10},
+{0x584e, 0x11},
+{0x584f, 0x10},
+{0x5850, 0x0f},
+{0x5851, 0x0c},
+{0x5852, 0x0f},
+{0x5853, 0x10},
+{0x5854, 0x10},
+{0x5855, 0x0f},
+{0x5856, 0x0e},
+{0x5857, 0x0b},
+{0x5858, 0x10},
+{0x5859, 0x0d},
+{0x585a, 0x0d},
+{0x585b, 0x0c},
+{0x585c, 0x0c},
+{0x585d, 0x0c},
+{0x585e, 0x0b},
+{0x585f, 0x0c},
+{0x5860, 0x0c},
+{0x5861, 0x0c},
+{0x5862, 0x0d},
+{0x5863, 0x08},
+{0x5864, 0x11},
+{0x5865, 0x18},
+{0x5866, 0x18},
+{0x5867, 0x19},
+{0x5868, 0x17},
+{0x5869, 0x19},
+{0x586a, 0x16},
+{0x586b, 0x13},
+{0x586c, 0x13},
+{0x586d, 0x12},
+{0x586e, 0x13},
+{0x586f, 0x16},
+{0x5870, 0x14},
+{0x5871, 0x12},
+{0x5872, 0x10},
+{0x5873, 0x11},
+{0x5874, 0x11},
+{0x5875, 0x16},
+{0x5876, 0x14},
+{0x5877, 0x11},
+{0x5878, 0x10},
+{0x5879, 0x0f},
+{0x587a, 0x10},
+{0x587b, 0x14},
+{0x587c, 0x13},
+{0x587d, 0x12},
+{0x587e, 0x11},
+{0x587f, 0x11},
+{0x5880, 0x12},
+{0x5881, 0x15},
+{0x5882, 0x14},
+{0x5883, 0x15},
+{0x5884, 0x15},
+{0x5885, 0x15},
+{0x5886, 0x13},
+{0x5887, 0x17},
+{0x3710, 0x10},
+{0x3632, 0x51},
+{0x3702, 0x10},
+{0x3703, 0xb2},
+{0x3704, 0x18},
+{0x370b, 0x40},
+{0x370d, 0x03},
+{0x3631, 0x01},
+{0x3632, 0x52},
+{0x3606, 0x24},
+{0x3620, 0x96},
+{0x5785, 0x07},
+{0x3a13, 0x30},
+{0x3600, 0x52},
+{0x3604, 0x48},
+{0x3606, 0x1b},
+{0x370d, 0x0b},
+{0x370f, 0xc0},
+{0x3709, 0x01},
+{0x3823, 0x00},
+{0x5007, 0x00},
+{0x5009, 0x00},
+{0x5011, 0x00},
+{0x5013, 0x00},
+{0x519e, 0x00},
+{0x5086, 0x00},
+{0x5087, 0x00},
+{0x5088, 0x00},
+{0x5089, 0x00},
+{0x302b, 0x00},
+{0x3621, 0x87},
+{0x3a00, 0x78},
+{0x3002, 0x5c},
+{0x3003, 0x02},  
+{0x3005, 0xff}, 
+{0x3006, 0x43}, 
+{0x3007, 0x37}, 
+{0x3011, 0x0a}, 
+{0x3012, 0x02}, 
+{0x350c, 0x03},  
+{0x350d, 0xf0}, 
+{0x3602, 0xfc}, 
+{0x3612, 0xff}, 
+{0x3613, 0x00}, 
+{0x3621, 0x87}, 
+{0x3622, 0x60}, 
+{0x3623, 0x01}, 
+{0x3604, 0x48}, 
+{0x3705, 0xdb}, 
+{0x370a, 0x81}, 
+{0x370d, 0x0b}, 
+{0x3801, 0x50}, 
+{0x3803, 0x08},  
+{0x3804, 0x05},  
+{0x3805, 0x00},  
+{0x3806, 0x03},  
+{0x3807, 0xc0}, 
+{0x3808, 0x04}, //;03
+{0x3809, 0x00}, //;20
+{0x380a, 0x03}, //;02
+{0x380b, 0x00}, //;58
+{0x380c, 0x07}, 
+{0x380d, 0xc0}, 
+{0x380e, 0x03},  
+{0x380f, 0xf0}, 
+{0x3810, 0x80}, 
+{0x3815, 0x02},  
+{0x3818, 0xc1}, 
+{0x3824, 0x11}, 
+{0x3825, 0xb0}, 
+{0x3827, 0x08},  
+{0x3a08, 0x12}, 
+{0x3a09, 0xc0}, 
+{0x3a0a, 0x0f}, 
+{0x3a0b, 0xa0}, 
+{0x3a0d, 0x04}, 
+{0x3a0e, 0x03}, 
+{0x3a1a, 0x05}, 
+{0x401c, 0x04}, 
+//{0x460c, 0x00}, //02
+{0x460b, 0x37}, 
+{0x471d, 0x05},  
+{0x4713, 0x03},  
+{0x471c, 0xd0}, 
+{0x5682, 0x05},  
+{0x5683, 0x00},  
+{0x5686, 0x03},  
+{0x5687, 0xbc}, 
+{0x5001, 0xff},
+{0x589b, 0x04},  
+{0x589a, 0xc5}, 
+{0x4407, 0x04},  
+{0x589b, 0x00},  
+{0x589a, 0xc0}, 
+{0x3002, 0x0c}, 
+{0x3002, 0x00}, 
+{0x3503, 0x00}, 
+{0x3010, 0x10}, //;for OV538
+{0x3503, 0x00}, //; AGC_AEC
+{0x3406, 0x00}, //; AWB
+};
+
+CAM_REG_ADDR_VAL_TYPE	cam_CCI_IQ[]=
+{
+//;
+//; lens
+//;G
+{0x5800, 0x53},
+{0x5801, 0x34},
+{0x5802, 0x27},
+{0x5803, 0x23},
+{0x5804, 0x23},
+{0x5805, 0x26},
+{0x5806, 0x35},
+{0x5807, 0x53},
+{0x5808, 0x24},
+{0x5809, 0x1a},
+{0x580a, 0x14},
+{0x580b, 0x11},
+{0x580c, 0x11},
+{0x580d, 0x13},
+{0x580e, 0x19},
+{0x580f, 0x22},
+{0x5810, 0x18},
+{0x5811, 0x0f},
+{0x5812, 0x09},
+{0x5813, 0x05},
+{0x5814, 0x05},
+{0x5815, 0x08},
+{0x5816, 0x0e},
+{0x5817, 0x15},
+{0x5818, 0x15},
+{0x5819, 0x09},
+{0x581a, 0x03},
+{0x581b, 0x00},
+{0x581c, 0x00},
+{0x581d, 0x03},
+{0x581e, 0x08},
+{0x581f, 0x0d},
+{0x5820, 0x13},
+{0x5821, 0x09},
+{0x5822, 0x04},
+{0x5823, 0x00},
+{0x5824, 0x00},
+{0x5825, 0x02},
+{0x5826, 0x09},
+{0x5827, 0x0e},
+{0x5828, 0x1a},
+{0x5829, 0x0e},
+{0x582a, 0x08},
+{0x582b, 0x05},
+{0x582c, 0x05},
+{0x582d, 0x08},
+{0x582e, 0x0d},
+{0x582f, 0x12},
+{0x5830, 0x23},
+{0x5831, 0x1a},
+{0x5832, 0x13},
+{0x5833, 0x10},
+{0x5834, 0x10},
+{0x5835, 0x12},
+{0x5836, 0x18},
+{0x5837, 0x24},
+{0x5838, 0x50},
+{0x5839, 0x30},
+{0x583a, 0x25},
+{0x583b, 0x20},
+{0x583c, 0x20},
+{0x583d, 0x26},
+{0x583e, 0x36},
+{0x583f, 0x49},
+//;B
+{0x5840, 0x0a},
+{0x5841, 0x0e},
+{0x5842, 0x0c},
+{0x5843, 0x0d},
+{0x5844, 0x0c},
+{0x5845, 0x0d},
+{0x5846, 0x0a},
+{0x5847, 0x0b},
+{0x5848, 0x0e},
+{0x5849, 0x0d},
+{0x584a, 0x0d},
+{0x584b, 0x08},
+{0x584c, 0x0c},
+{0x584d, 0x0d},
+{0x584e, 0x0f},
+{0x584f, 0x10},
+{0x5850, 0x0f},
+{0x5851, 0x0a},
+{0x5852, 0x0c},
+{0x5853, 0x0d},
+{0x5854, 0x0f},
+{0x5855, 0x10},
+{0x5856, 0x0f},
+{0x5857, 0x09},
+{0x5858, 0x0d},
+{0x5859, 0x0d},
+{0x585a, 0x0d},
+{0x585b, 0x0e},
+{0x585c, 0x0e},
+{0x585d, 0x08},
+{0x585e, 0x0c},
+{0x585f, 0x0a},
+{0x5860, 0x09},
+{0x5861, 0x09},
+{0x5862, 0x09},
+{0x5863, 0x09},
+//;R
+{0x5864, 0x10},
+{0x5865, 0x11},
+{0x5866, 0x13},
+{0x5867, 0x15},
+{0x5868, 0x11},
+{0x5869, 0x0f},
+{0x586a, 0x17},
+{0x586b, 0x15},
+{0x586c, 0x14},
+{0x586d, 0x14},
+{0x586e, 0x15},
+{0x586f, 0x18},
+{0x5870, 0x17},
+{0x5871, 0x13},
+{0x5872, 0x10},
+{0x5873, 0x10},
+{0x5874, 0x12},
+{0x5875, 0x1a},
+{0x5876, 0x18},
+{0x5877, 0x13},
+{0x5878, 0x10},
+{0x5879, 0x10},
+{0x587a, 0x12},
+{0x587b, 0x1b},
+{0x587c, 0x16},
+{0x587d, 0x17},
+{0x587e, 0x14},
+{0x587f, 0x15},
+{0x5880, 0x16},
+{0x5881, 0x19},
+{0x5882, 0x11},
+{0x5883, 0x13},
+{0x5884, 0x16},
+{0x5885, 0x17},
+{0x5886, 0x12},
+{0x5887, 0x14},
+
+//;Gamma
+{0x5480, 0x04},
+{0x5481, 0x13},
+{0x5482, 0x29},
+{0x5483, 0x4f},
+{0x5484, 0x61},
+{0x5485, 0x6f},
+{0x5486, 0x7b},
+{0x5487, 0x86},
+{0x5488, 0x91},
+{0x5489, 0x9a},
+{0x548a, 0xaa},
+{0x548b, 0xb7},
+{0x548c, 0xc8},
+{0x548d, 0xd9},
+{0x548e, 0xea},
+{0x548f, 0x1d},
+{0x5490, 0x05},
+{0x5491, 0x00},
+{0x5492, 0x04},
+{0x5493, 0x20},
+{0x5494, 0x03},
+{0x5495, 0x60},
+{0x5496, 0x02},
+{0x5497, 0xb8},
+{0x5498, 0x02},
+{0x5499, 0x86},
+{0x549a, 0x02},
+{0x549b, 0x5b},
+{0x549c, 0x02},
+{0x549d, 0x3b},
+{0x549e, 0x02},
+{0x549f, 0x1c},
+{0x54a0, 0x02},
+{0x54a1, 0x04},
+{0x54a2, 0x01},
+{0x54a3, 0xed},
+{0x54a4, 0x01},
+{0x54a5, 0xc5},
+{0x54a6, 0x01},
+{0x54a7, 0xa5},
+{0x54a8, 0x01},
+{0x54a9, 0x6c},
+{0x54aa, 0x01},
+{0x54ab, 0x41},
+{0x54ac, 0x01},
+{0x54ad, 0x20},
+{0x54ae, 0x00},
+{0x54af, 0x16},
+{0x54b0, 0x01},
+{0x54b1, 0x20},
+{0x54b2, 0x00},
+{0x54b3, 0x10},
+{0x54b4, 0x00},
+{0x54b5, 0xf0},
+{0x54b6, 0x00},
+{0x54b7, 0xdf},
+
+//;AE Target
+{0x3a0f, 0x32}, //;6c
+{0x3a10, 0x2a}, //;62
+{0x3a11, 0x61}, //;b3
+{0x3a1b, 0x32}, //;6c
+{0x3a1e, 0x2a}, //;62
+{0x3a1f, 0x10}, //;b3
+//;
+//;AWB0
+{0x5180, 0xff},
+{0x5181, 0x52},
+{0x5182, 0x11},
+{0x5183, 0x14},
+{0x5184, 0x25},
+{0x5185, 0x7f},
+{0x5186, 0x1c},
+{0x5187, 0x16},
+{0x5188, 0x18},
+{0x5189, 0x7f},
+{0x518a, 0x6a},
+{0x518b, 0xad},
+{0x518c, 0x90},
+{0x518d, 0x29},
+{0x518e, 0x16},
+{0x518f, 0x63},
+{0x5190, 0x4f},
+{0x5191, 0xf8},
+{0x5192, 0x4 },
+{0x5193, 0x70},
+{0x5194, 0xf0},
+{0x5195, 0xf0},
+{0x5196, 0x3 },
+{0x5197, 0x1 },
+{0x5198, 0x6 },
+{0x5199, 0x6f},
+{0x519a, 0x4 },
+{0x519b, 0x0 },
+{0x519c, 0x4 },
+{0x519d, 0xec},
+{0x519e, 0x0 },
+//;
+//;color
+{0x5380, 0x01},
+{0x5381, 0x00},
+{0x5382, 0x00},
+{0x5383, 0x16},
+{0x5384, 0x00},
+{0x5385, 0x07},
+{0x5386, 0x00},
+{0x5387, 0x00},
+{0x5388, 0x01},
+{0x5389, 0x58},
+{0x538a, 0x00},
+{0x538b, 0x38},
+{0x538c, 0x00},
+{0x538d, 0x00},
+{0x538e, 0x00},
+{0x538f, 0x2c},
+{0x5390, 0x01},
+{0x5391, 0x08},
+{0x5392, 0x00},
+{0x5393, 0xa6},
+{0x5394, 0x08},
+};
+
+CAM_REG_ADDR_VAL_TYPE	cam_night_mode_setup[]=
+{
+{0x3a19, 0xf8},
+{0x3a00, 0x7c},
+{0x3a02, 0x01},
+{0x3a03, 0xf4},
+};
+
+CAM_REG_ADDR_VAL_TYPE	cam_initial_5M_setup[]=
+{
+//2048x1536_YUV_30fps initial preview
+{0x3103, 0x93},
+{0x3008, 0x82},
+{0x3017, 0x7f},
+{0x3018, 0xfc},
+{0x3615, 0xf0},
+{0x3000, 0x00},
+{0x3001, 0x00},
+{0x3002, 0x5c},
+{0x3003, 0x00},
+{0x3004, 0xff},
+{0x3005, 0xff},
+{0x3006, 0x43},
+{0x3007, 0x37},
+{0x3011, 0x09},
+{0x3012, 0x02},
+{0x3010, 0x10},
+{0x460c, 0x20},
+{0x3815, 0x04},
+{0x370c, 0xa0},
+{0x3602, 0xfc},
+{0x3612, 0xff},
+{0x3634, 0xc0},
+{0x3613, 0x00},
+{0x3605, 0x7c},
+{0x3621, 0x09},
+{0x3622, 0x60},
+{0x3604, 0x40},
+{0x3603, 0xa7},
+{0x3603, 0x27},
+{0x4000, 0x21},
+{0x401d, 0x22},
+{0x3600, 0x54},
+{0x3605, 0x04},
+{0x3606, 0x3f},
+{0x3c01, 0x80},
+{0x5000, 0x4f},
+{0x5020, 0x04},
+{0x5181, 0x79},
+{0x5182, 0x00},
+{0x5185, 0x22},
+{0x5197, 0x01}, 
+{0x5001, 0xff}, 
+{0x5500, 0x0a}, 
+{0x5504, 0x00}, 
+{0x5505, 0x7f}, 
+{0x5080, 0x08},
+{0x300e, 0x18},
+{0x4610, 0x00},
+{0x471d, 0x05},
+{0x4708, 0x06},
+{0x3808, 0x02},
+{0x3809, 0x80},
+{0x380a, 0x01},
+{0x380b, 0xe0},
+{0x380e, 0x07},
+{0x380f, 0xd0},
+{0x501f, 0x00},
+{0x5000, 0x4f},
+{0x4300, 0x30},
+{0x3503, 0x07},
+{0x3501, 0x73},
+{0x3502, 0x80},
+{0x350b, 0x00},
+{0x3503, 0x07},
+{0x3824, 0x11},
+{0x3825, 0xb0},
+{0x3501, 0x1e},
+{0x3502, 0x80},
+{0x350b, 0x7f},
+{0x380c, 0x07},
+{0x380d, 0x2a},
+{0x380e, 0x03},
+{0x380f, 0xe8},
+{0x3a0d, 0x04},
+{0x3a0e, 0x03},
+{0x3818, 0xc1},
+{0x3705, 0xdb},
+{0x370a, 0x81},
+{0x3801, 0x80},
+{0x3621, 0xc7},
+{0x3801, 0x50},
+{0x3803, 0x08},
+{0x3827, 0x08},
+{0x3810, 0x80},
+{0x3804, 0x05},
+{0x3805, 0x00},
+{0x5682, 0x05},
+{0x5683, 0x00},
+{0x3806, 0x03},
+{0x3807, 0xc0},
+{0x5686, 0x03},
+{0x5687, 0xbc},
+{0x3a00, 0x78},
+{0x3a1a, 0x05},
+{0x3a13, 0x30},
+{0x3a18, 0x00},
+{0x3a19, 0x7c},
+{0x3a08, 0x12},
+{0x3a09, 0xc0},
+{0x3a0a, 0x0f},
+{0x3a0b, 0xa0},
+{0x350c, 0x07},
+{0x350d, 0xd0},
+{0x3500, 0x00},
+{0x3501, 0x00},
+{0x3502, 0x00},
+{0x350a, 0x00},
+{0x350b, 0x00},
+{0x3503, 0x00},
+{0x528a, 0x02},
+{0x528b, 0x04},
+{0x528c, 0x08},
+{0x528d, 0x08},
+{0x528e, 0x08},
+{0x528f, 0x10},
+{0x5290, 0x10},
+{0x5292, 0x00},
+{0x5293, 0x02},
+{0x5294, 0x00},
+{0x5295, 0x02},
+{0x5296, 0x00},
+{0x5297, 0x02},
+{0x5298, 0x00},
+{0x5299, 0x02},
+{0x529a, 0x00},
+{0x529b, 0x02},
+{0x529c, 0x00},
+{0x529d, 0x02},
+{0x529e, 0x00},
+{0x529f, 0x02},
+{0x3a0f, 0x3c},
+{0x3a10, 0x30},
+{0x3a1b, 0x3c},
+{0x3a1e, 0x30},
+{0x3a11, 0x70},
+{0x3a1f, 0x10},
+{0x3030, 0x2b},
+{0x3a02, 0x00},
+{0x3a03, 0x7d},
+{0x3a04, 0x00},
+{0x3a14, 0x00},
+{0x3a15, 0x7d},
+{0x3a16, 0x00},
+{0x3a00, 0x78},
+{0x3a08, 0x12},
+{0x3a09, 0xc0},
+{0x3a0a, 0x0f},
+{0x3a0b, 0xa0},
+{0x3a0d, 0x04},
+{0x3a0e, 0x03},
+{0x5193, 0x70},
+{0x589b, 0x04},
+{0x589a, 0xc5},
+{0x4001, 0x42},
+{0x401c, 0x04},
+{0x528a, 0x01},
+{0x528b, 0x04},
+{0x528c, 0x08},
+{0x528d, 0x10},
+{0x528e, 0x20},
+{0x528f, 0x28},
+{0x5290, 0x30},
+{0x5292, 0x00},
+{0x5293, 0x01},
+{0x5294, 0x00},
+{0x5295, 0x04},
+{0x5296, 0x00},
+{0x5297, 0x08},
+{0x5298, 0x00},
+{0x5299, 0x10},
+{0x529a, 0x00},
+{0x529b, 0x20},
+{0x529c, 0x00},
+{0x529d, 0x28},
+{0x529e, 0x00},
+{0x529f, 0x30},
+{0x5282, 0x00},
+{0x5300, 0x00},
+{0x5301, 0x20},
+{0x5302, 0x00},
+{0x5303, 0x7c},
+{0x530c, 0x00},
+{0x530d, 0x0c},
+{0x530e, 0x20},
+{0x530f, 0x80},
+{0x5310, 0x20},
+{0x5311, 0x80},
+{0x5308, 0x20},
+{0x5309, 0x40},
+{0x5304, 0x00},
+{0x5305, 0x30},
+{0x5306, 0x00},
+{0x5307, 0x80},
+{0x5314, 0x08},
+{0x5315, 0x20},
+{0x5319, 0x30},
+{0x5316, 0x10},
+{0x5317, 0x00},
+{0x5318, 0x02},
+{0x5380, 0x01},
+{0x5381, 0x00},
+{0x5382, 0x00},
+{0x5383, 0x4e},
+{0x5384, 0x00},
+{0x5385, 0x0f},
+{0x5386, 0x00},
+{0x5387, 0x00},
+{0x5388, 0x01},
+{0x5389, 0x15},
+{0x538a, 0x00},
+{0x538b, 0x31},
+{0x538c, 0x00},
+{0x538d, 0x00},
+{0x538e, 0x00},
+{0x538f, 0x0f},
+{0x5390, 0x00},
+{0x5391, 0xab},
+{0x5392, 0x00},
+{0x5393, 0xa2},
+{0x5394, 0x08},
+{0x5480, 0x14},
+{0x5481, 0x21},
+{0x5482, 0x36},
+{0x5483, 0x57},
+{0x5484, 0x65},
+{0x5485, 0x71},
+{0x5486, 0x7d},
+{0x5487, 0x87},
+{0x5488, 0x91},
+{0x5489, 0x9a},
+{0x548a, 0xaa},
+{0x548b, 0xb8},
+{0x548c, 0xcd},
+{0x548d, 0xdd},
+{0x548e, 0xea},
+{0x548f, 0x1d},
+{0x5490, 0x05},
+{0x5491, 0x00},
+{0x5492, 0x04},
+{0x5493, 0x20},
+{0x5494, 0x03},
+{0x5495, 0x60},
+{0x5496, 0x02},
+{0x5497, 0xb8},
+{0x5498, 0x02},
+{0x5499, 0x86},
+{0x549a, 0x02},
+{0x549b, 0x5b},
+{0x549c, 0x02},
+{0x549d, 0x3b},
+{0x549e, 0x02},
+{0x549f, 0x1c},
+{0x54a0, 0x02},
+{0x54a1, 0x04},
+{0x54a2, 0x01},
+{0x54a3, 0xed},
+{0x54a4, 0x01},
+{0x54a5, 0xc5},
+{0x54a6, 0x01},
+{0x54a7, 0xa5},
+{0x54a8, 0x01},
+{0x54a9, 0x6c},
+{0x54aa, 0x01},
+{0x54ab, 0x41},
+{0x54ac, 0x01},
+{0x54ad, 0x20},
+{0x54ae, 0x00},
+{0x54af, 0x16},
+{0x54b0, 0x01},
+{0x54b1, 0x20},
+{0x54b2, 0x00},
+{0x54b3, 0x10},
+{0x54b4, 0x00},
+{0x54b5, 0xf0},
+{0x54b6, 0x00},
+{0x54b7, 0xdf},
+{0x5402, 0x3f},
+{0x5403, 0x00},
+{0x3406, 0x00},
+{0x5180, 0xff},
+{0x5181, 0x52},
+{0x5182, 0x11},
+{0x5183, 0x14},
+{0x5184, 0x25},
+{0x5185, 0x24},
+{0x5186, 0x06},
+{0x5187, 0x08},
+{0x5188, 0x08},
+{0x5189, 0x7c},
+{0x518a, 0x60},
+{0x518b, 0xb2},
+{0x518c, 0xb2},
+{0x518d, 0x44},
+{0x518e, 0x3d},
+{0x518f, 0x58},
+{0x5190, 0x46},
+{0x5191, 0xf8},
+{0x5192, 0x04},
+{0x5193, 0x70},
+{0x5194, 0xf0},
+{0x5195, 0xf0},
+{0x5196, 0x03},
+{0x5197, 0x01},
+{0x5198, 0x04},
+{0x5199, 0x12},
+{0x519a, 0x04},
+{0x519b, 0x00},
+{0x519c, 0x06},
+{0x519d, 0x82},
+{0x519e, 0x00},
+{0x5025, 0x80},
+{0x3a0f, 0x38},
+{0x3a10, 0x30},
+{0x3a1b, 0x3a},
+{0x3a1e, 0x2e},
+{0x3a11, 0x60},
+{0x3a1f, 0x10},
+{0x5688, 0xa6},
+{0x5689, 0x6a},
+{0x568a, 0xea},
+{0x568b, 0xae},
+{0x568c, 0xa6},
+{0x568d, 0x6a},
+{0x568e, 0x62},
+{0x568f, 0x26},
+{0x5583, 0x40},
+{0x5584, 0x40},
+{0x5580, 0x02},
+{0x5000, 0xcf},
+{0x5800, 0x27},
+{0x5801, 0x19},
+{0x5802, 0x12},
+{0x5803, 0x0f},
+{0x5804, 0x10},
+{0x5805, 0x15},
+{0x5806, 0x1e},
+{0x5807, 0x2f},
+{0x5808, 0x15},
+{0x5809, 0x0d},
+{0x580a, 0x0a},
+{0x580b, 0x09},
+{0x580c, 0x0a},
+{0x580d, 0x0c},
+{0x580e, 0x12},
+{0x580f, 0x19},
+{0x5810, 0x0b},
+{0x5811, 0x07},
+{0x5812, 0x04},
+{0x5813, 0x03},
+{0x5814, 0x03},
+{0x5815, 0x06},
+{0x5816, 0x0a},
+{0x5817, 0x0f},
+{0x5818, 0x0a},
+{0x5819, 0x05},
+{0x581a, 0x01},
+{0x581b, 0x00},
+{0x581c, 0x00},
+{0x581d, 0x03},
+{0x581e, 0x08},
+{0x581f, 0x0c},
+{0x5820, 0x0a},
+{0x5821, 0x05},
+{0x5822, 0x01},
+{0x5823, 0x00},
+{0x5824, 0x00},
+{0x5825, 0x03},
+{0x5826, 0x08},
+{0x5827, 0x0c},
+{0x5828, 0x0e},
+{0x5829, 0x08},
+{0x582a, 0x06},
+{0x582b, 0x04},
+{0x582c, 0x05},
+{0x582d, 0x07},
+{0x582e, 0x0b},
+{0x582f, 0x12},
+{0x5830, 0x18},
+{0x5831, 0x10},
+{0x5832, 0x0c},
+{0x5833, 0x0a},
+{0x5834, 0x0b},
+{0x5835, 0x0e},
+{0x5836, 0x15},
+{0x5837, 0x19},
+{0x5838, 0x32},
+{0x5839, 0x1f},
+{0x583a, 0x18},
+{0x583b, 0x16},
+{0x583c, 0x17},
+{0x583d, 0x1e},
+{0x583e, 0x26},
+{0x583f, 0x53},
+{0x5840, 0x10},
+{0x5841, 0x0f},
+{0x5842, 0x0d},
+{0x5843, 0x0c},
+{0x5844, 0x0e},
+{0x5845, 0x09},
+{0x5846, 0x11},
+{0x5847, 0x10},
+{0x5848, 0x10},
+{0x5849, 0x10},
+{0x584a, 0x10},
+{0x584b, 0x0e},
+{0x584c, 0x10},
+{0x584d, 0x10},
+{0x584e, 0x11},
+{0x584f, 0x10},
+{0x5850, 0x0f},
+{0x5851, 0x0c},
+{0x5852, 0x0f},
+{0x5853, 0x10},
+{0x5854, 0x10},
+{0x5855, 0x0f},
+{0x5856, 0x0e},
+{0x5857, 0x0b},
+{0x5858, 0x10},
+{0x5859, 0x0d},
+{0x585a, 0x0d},
+{0x585b, 0x0c},
+{0x585c, 0x0c},
+{0x585d, 0x0c},
+{0x585e, 0x0b},
+{0x585f, 0x0c},
+{0x5860, 0x0c},
+{0x5861, 0x0c},
+{0x5862, 0x0d},
+{0x5863, 0x08},
+{0x5864, 0x11},
+{0x5865, 0x18},
+{0x5866, 0x18},
+{0x5867, 0x19},
+{0x5868, 0x17},
+{0x5869, 0x19},
+{0x586a, 0x16},
+{0x586b, 0x13},
+{0x586c, 0x13},
+{0x586d, 0x12},
+{0x586e, 0x13},
+{0x586f, 0x16},
+{0x5870, 0x14},
+{0x5871, 0x12},
+{0x5872, 0x10},
+{0x5873, 0x11},
+{0x5874, 0x11},
+{0x5875, 0x16},
+{0x5876, 0x14},
+{0x5877, 0x11},
+{0x5878, 0x10},
+{0x5879, 0x0f},
+{0x587a, 0x10},
+{0x587b, 0x14},
+{0x587c, 0x13},
+{0x587d, 0x12},
+{0x587e, 0x11},
+{0x587f, 0x11},
+{0x5880, 0x12},
+{0x5881, 0x15},
+{0x5882, 0x14},
+{0x5883, 0x15},
+{0x5884, 0x15},
+{0x5885, 0x15},
+{0x5886, 0x13},
+{0x5887, 0x17},
+{0x3710, 0x10},
+{0x3632, 0x51},
+{0x3702, 0x10},
+{0x3703, 0xb2},
+{0x3704, 0x18},
+{0x370b, 0x40},
+{0x370d, 0x03},
+{0x3631, 0x01},
+{0x3632, 0x52},
+{0x3606, 0x24},
+{0x3620, 0x96},
+{0x5785, 0x07},
+{0x3a13, 0x30},
+{0x3600, 0x52},
+{0x3604, 0x48},
+{0x3606, 0x1b},
+{0x370d, 0x0b},
+{0x370f, 0xc0},
+{0x3709, 0x01},
+{0x3823, 0x00},
+{0x5007, 0x00},
+{0x5009, 0x00},
+{0x5011, 0x00},
+{0x5013, 0x00},
+{0x519e, 0x00},
+{0x5086, 0x00},
+{0x5087, 0x00},
+{0x5088, 0x00},
+{0x5089, 0x00},
+{0x302b, 0x00},
+{0x3621, 0x87},
+{0x3a00, 0x78},
+{0x3002,0x5c},                   
+{0x3003,0x02},                   
+{0x3005,0xff},                   
+{0x3006,0x43},                   
+{0x3007,0x37},                                                 
+{0x3011,0x0a},                   
+{0x3012,0x02},                                                 
+{0x350c,0x03},                   
+{0x350d,0xf0},                                                                              
+{0x3602,0xfc},                   
+{0x3612,0xff},                   
+{0x3613,0x00},                   
+{0x3621,0x87},                   
+{0x3622,0x60},                   
+{0x3623,0x01},                   
+{0x3604,0x48},                                                 
+{0x3705,0xdb},                   
+{0x370a,0x81},                   
+{0x370d,0x0b},                                                 
+{0x3801,0x50},                   
+{0x3803,0x08},                   
+{0x3804,0x05},                   
+{0x3805,0x00},                   
+{0x3806,0x03},                   
+{0x3807,0xc0},                                                 
+{0x3808,0x04},//03                
+{0x3809,0x00},//20                
+{0x380a,0x03},//02                
+{0x380b,0x00},//58                                         
+{0x380c,0x07},                   
+{0x380d,0xc0},                   
+{0x380e,0x03},                   
+{0x380f,0xf0},                   
+{0x3810,0x80},                   
+{0x3815,0x02},                   
+{0x3818,0xc1},                   
+{0x3824,0x11},                   
+{0x3825,0xb0},                   
+{0x3827,0x08},                                                 
+{0x3a08,0x12},                   
+{0x3a09,0xc0},                   
+{0x3a0a,0x0f},                   
+{0x3a0b,0xa0},                   
+{0x3a0d,0x04},                   
+{0x3a0e,0x03},                   
+{0x3a1a,0x05},                                    
+{0x401c,0x04},                   
+//0x460c,0x00,0x02               
+{0x460b,0x37},                   
+{0x471d, 0x05},  
+{0x4713, 0x03},  
+{0x471c,0xd0},                                                 
+{0x5682, 0x05},  
+{0x5683, 0x00},  
+{0x5686, 0x03},  
+{0x5687,0xbc},                                                                               
+{0x5001,0xff},                                                 
+{0x589b,0x04},                   
+{0x589a,0xc5},                                                 
+{0x4407,0x04},                   
+{0x589b,0x00},                   
+{0x589a,0xc0},                   
+{0x3002,0x0c},                   
+{0x3002,0x00},                   
+{0x3503,0x00},                   
+//                             
+{0x3010, 0x00}, //;for OV538
+{0x3503, 0x00}, //; AGC_AEC
+{0x3406, 0x00}, //; AWB
+//5M                           
+{0x3406,0x01},                   
+{0x3003,0x00},                   
+{0x3005,0xff},                   
+{0x3006,0xff},                   
+{0x3007,0x3f},                   
+{0x3011,0x08},                   
+{0x3012,0x00},                   
+{0x350C,0x07},                   
+{0x350D,0xd0},                   
+{0x3602,0xe4},                   
+{0x3612,0xac},                   
+{0x3613,0x44},                   
+{0x3621,0x09},//29	//Mirror &,0xflip  
+{0x3622,0x60},                   
+{0x3623,0x22},                   
+{0x3604,0x60},                   
+{0x3705,0xda},                   
+{0x370A,0x80},                   
+{0x370D,0x03},                   
+{0x3801,0x8a},                   
+{0x3803,0x0a},                   
+{0x3804,0x0a},                   
+{0x3805,0x20},                   
+{0x3806,0x07},                   
+{0x3807,0x98},                   
+{0x3808,0x0a},                   
+{0x3809,0x20},                   
+{0x380A,0x07},                   
+{0x380B,0x98},                   
+{0x380C,0x0c},                   
+{0x380D,0x80},                   
+{0x380E,0x07},                   
+{0x380F,0xd0},                   
+{0x3824,0x11},                   
+{0x3825,0xac},                   
+{0x3827,0x0a},                   
+{0x3A08,0x09},                   
+{0x3A09,0x60},                   
+{0x3A0A,0x07},                   
+{0x3A0B,0xd0},                   
+{0x3A0D,0x10},                   
+{0x3A0E,0x0d},                   
+{0x3A1A,0x04},                   
+{0x460B,0x35},                   
+{0x471D,0x00},                   
+{0x4713,0x03},                   
+{0x5001,0xff},                   
+{0x589B,0x00},                   
+{0x589A,0xc0},                   
+{0x4407,0x04},                   
+{0x589B,0x00},                   
+{0x589A,0xc0},                   
+{0x3002,0x1c},                   
+{0x460C,0x20},                   
+{0x471C,0xd0},                   
+{0x4721,0x01},                   
+{0x3815,0x01},                   
+{0x501F,0x00},                   
+{0x5002,0xe0},                   
+{0x4300,0x30},                   
+{0x3818,0xc0},//A0	//Mirror&Flip    
+{0x3810,0xc2},                   
+{0x3010,0x20}, 
+/*                                               
+// QXGA key                                                  
+{0x3800,0x01},                   
+{0x3801,0x8a},                   
+{0x3802,0x00},                   
+{0x3803,0x0a},                   
+{0x3804,0x0a},                   
+{0x3805,0x20},                   
+{0x3806,0x07},                   
+{0x3807,0x98},                   
+{0x3808,0x08},                   
+{0x3809,0x00},                   
+{0x380A,0x06},                   
+{0x380B,0x00},                   
+{0x380C,0x0c},                   
+{0x380D,0x80},                   
+{0x380E,0x07},                   
+{0x380F,0xd0},                   
+{0x5001,0x7f},                   
+{0x5680,0x00},                   
+{0x5681,0x00},                   
+{0x5682,0x0a},                   
+{0x5683,0x20},                   
+{0x5684,0x00},                   
+{0x5685,0x00},                   
+{0x5686,0x07},                   
+{0x5687,0x98},
+*/                   
+};
+
+CAM_REG_ADDR_VAL_TYPE	cam_VGA_initial_setup[]=
+{
+//Size: VGA 30fps	
+{0x3103,0x93},
+{0x3008,0x82},
+{0x3017,0x7f},
+{0x3018,0xfc},
+{0x3615,0xf0},
+{0x3000,0x20},
+{0x3001,0x00},
+{0x3002,0x5c},
+{0x3003,0x00},
+{0x3004,0xff},
+{0x3005,0xff},
+{0x3006,0x43},
+{0x3007,0x37},
+{0x3011,0x09},
+{0x3012,0x02},
+{0x3010,0x00},
+{0x460c,0x20},
+{0x3815,0x04},
+{0x370c,0xa0},
+{0x3602,0xfc},
+{0x3612,0xff},
+{0x3634,0xc0},
+{0x3613,0x00},
+{0x3605,0x7c},
+{0x3621,0x09},
+{0x3622,0x60},
+{0x3604,0x40},
+{0x3603,0xa7},
+{0x3603,0x27},
+{0x4000,0x21},
+{0x401d,0x22},
+{0x3600,0x54},
+{0x3605,0x04},
+{0x3606,0x3f},
+{0x3c01,0x80},
+{0x5000,0x4f},
+{0x5020,0x04},
+{0x5181,0x79},
+{0x5182,0x00},
+{0x5185,0x22},
+{0x5197,0x01},
+{0x5001,0xff},
+{0x5500,0x0a},
+{0x5504,0x00},
+{0x5505,0x7f},
+{0x5080,0x08},
+{0x300e,0x18},
+{0x4610,0x00},
+{0x471d,0x05},
+{0x4708,0x06},
+{0x3808,0x02},
+{0x3809,0x80},
+{0x380a,0x01},
+{0x380b,0xe0},
+{0x380e,0x07},
+{0x380f,0xd0},
+{0x501f,0x00},
+{0x5000,0x4f},
+{0x4300,0x30},
+//{0x3503,0x07},        
+{0x3501,0x73},
+{0x3502,0x80},
+{0x350b,0x00},
+//{0x3503,0x07},
+{0x3824,0x11},
+{0x3825,0xb0},
+{0x3501,0x1e},
+{0x3502,0x80},
+{0x350b,0x7f},
+{0x380c,0x07},
+{0x380d,0x2a},
+{0x380e,0x03},
+{0x380f,0xe8},
+{0x3a0d,0x04},
+{0x3a0e,0x03},
+{0x3818,0xc1},
+{0x3705,0xdb},
+{0x370a,0x81},
+{0x3801,0x80},
+{0x3621,0xc7},
+{0x3801,0x50},
+{0x3803,0x08},
+{0x3827,0x08},
+{0x3810,0x80},
+{0x3804,0x05},
+{0x3805,0x00},
+{0x5682,0x05},
+{0x5683,0x00},
+{0x3806,0x03},
+{0x3807,0xc0},
+{0x5686,0x03},
+{0x5687,0xbc},
+{0x3a00,0x78},
+{0x3a1a,0x05},
+{0x3a13,0x30},
+{0x3a18,0x00},
+{0x3a19,0x7c},
+{0x3a08,0x12},
+{0x3a09,0xc0},
+{0x3a0a,0x0f},
+{0x3a0b,0xa0},
+{0x350c,0x07},
+{0x350d,0xd0},
+{0x3500,0x00},
+{0x3501,0x00},
+{0x3502,0x00},
+{0x350a,0x00},
+{0x350b,0x00},
+//{0x3503,0x00},
+{0x528a,0x02},
+{0x528b,0x04},
+{0x528c,0x08},
+{0x528d,0x08},
+{0x528e,0x08},
+{0x528f,0x10},
+{0x5290,0x10},
+{0x5292,0x00},
+{0x5293,0x02},
+{0x5294,0x00},
+{0x5295,0x02},
+{0x5296,0x00},
+{0x5297,0x02},
+{0x5298,0x00},
+{0x5299,0x02},
+{0x529a,0x00},
+{0x529b,0x02},
+{0x529c,0x00},
+{0x529d,0x02},
+{0x529e,0x00},
+{0x529f,0x02},
+{0x3a0f,0x3c},
+{0x3a10,0x30},
+{0x3a1b,0x3c},
+{0x3a1e,0x30},
+{0x3a11,0x70},
+{0x3a1f,0x10},
+{0x3030,0x2b},
+{0x3a02,0x00},
+{0x3a03,0x7d},
+{0x3a04,0x00},
+{0x3a14,0x00},
+{0x3a15,0x7d},
+{0x3a16,0x00},
+{0x3a00,0x78},
+{0x3a08,0x12},
+{0x3a09,0xc0},
+{0x3a0a,0x0f},
+{0x3a0b,0xa0},
+{0x3a0d,0x04},
+{0x3a0e,0x03},
+{0x5193,0x70},
+{0x589b,0x04},
+{0x589a,0xc5},
+{0x4001,0x42},
+{0x401c,0x04},
+{0x528a,0x01},
+{0x528b,0x04},
+{0x528c,0x08},
+{0x528d,0x10},
+{0x528e,0x20},
+{0x528f,0x28},
+{0x5290,0x30},
+{0x5292,0x00},
+{0x5293,0x01},
+{0x5294,0x00},
+{0x5295,0x04},
+{0x5296,0x00},
+{0x5297,0x08},
+{0x5298,0x00},
+{0x5299,0x10},
+{0x529a,0x00},
+{0x529b,0x20},
+{0x529c,0x00},
+{0x529d,0x28},
+{0x529e,0x00},
+{0x529f,0x30},
+{0x5282,0x00},
+{0x5300,0x00},
+{0x5301,0x20},
+{0x5302,0x00},
+{0x5303,0x7c},
+{0x530c,0x00},
+{0x530d,0x0c},
+{0x530e,0x20},
+{0x530f,0x80},
+{0x5310,0x20},
+{0x5311,0x80},
+{0x5308,0x20},
+{0x5309,0x40},
+{0x5304,0x00},
+{0x5305,0x30},
+{0x5306,0x00},
+{0x5307,0x80},
+{0x5314,0x08},
+{0x5315,0x20},
+{0x5319,0x30},
+{0x5316,0x10},
+{0x5317,0x00},
+{0x5318,0x02},
+{0x5380,0x01},
+{0x5381,0x00},
+{0x5382,0x00},
+{0x5383,0x4e},
+{0x5384,0x00},
+{0x5385,0x0f},
+{0x5386,0x00},
+{0x5387,0x00},
+{0x5388,0x01},
+{0x5389,0x15},
+{0x538a,0x00},
+{0x538b,0x31},
+{0x538c,0x00},
+{0x538d,0x00},
+{0x538e,0x00},
+{0x538f,0x0f},
+{0x5390,0x00},
+{0x5391,0xab},
+{0x5392,0x00},
+{0x5393,0xa2},
+{0x5394,0x08},
+{0x5480,0x14},
+{0x5481,0x21},
+{0x5482,0x36},
+{0x5483,0x57},
+{0x5484,0x65},
+{0x5485,0x71},
+{0x5486,0x7d},
+{0x5487,0x87},
+{0x5488,0x91},
+{0x5489,0x9a},
+{0x548a,0xaa},
+{0x548b,0xb8},
+{0x548c,0xcd},
+{0x548d,0xdd},
+{0x548e,0xea},
+{0x548f,0x1d},
+{0x5490,0x05},
+{0x5491,0x00},
+{0x5492,0x04},
+{0x5493,0x20},
+{0x5494,0x03},
+{0x5495,0x60},
+{0x5496,0x02},
+{0x5497,0xb8},
+{0x5498,0x02},
+{0x5499,0x86},
+{0x549a,0x02},
+{0x549b,0x5b},
+{0x549c,0x02},
+{0x549d,0x3b},
+{0x549e,0x02},
+{0x549f,0x1c},
+{0x54a0,0x02},
+{0x54a1,0x04},
+{0x54a2,0x01},
+{0x54a3,0xed},
+{0x54a4,0x01},
+{0x54a5,0xc5},
+{0x54a6,0x01},
+{0x54a7,0xa5},
+{0x54a8,0x01},
+{0x54a9,0x6c},
+{0x54aa,0x01},
+{0x54ab,0x41},
+{0x54ac,0x01},
+{0x54ad,0x20},
+{0x54ae,0x00},
+{0x54af,0x16},
+{0x54b0,0x01},
+{0x54b1,0x20},
+{0x54b2,0x00},
+{0x54b3,0x10},
+{0x54b4,0x00},
+{0x54b5,0xf0},
+{0x54b6,0x00},
+{0x54b7,0xdf},
+{0x5402,0x3f},
+{0x5403,0x00},
+{0x3406,0x00},
+{0x5180,0xff},
+{0x5181,0x52},
+{0x5182,0x11},
+{0x5183,0x14},
+{0x5184,0x25},
+{0x5185,0x24},
+{0x5186,0x06},
+{0x5187,0x08},
+{0x5188,0x08},
+{0x5189,0x7c},
+{0x518a,0x60},
+{0x518b,0xb2},
+{0x518c,0xb2},
+{0x518d,0x44},
+{0x518e,0x3d},
+{0x518f,0x58},
+{0x5190,0x46},
+{0x5191,0xf8},
+{0x5192,0x04},
+{0x5193,0x70},
+{0x5194,0xf0},
+{0x5195,0xf0},
+{0x5196,0x03},
+{0x5197,0x01},
+{0x5198,0x04},
+{0x5199,0x12},
+{0x519a,0x04},
+{0x519b,0x00},
+{0x519c,0x06},
+{0x519d,0x82},
+{0x519e,0x00},
+{0x5025,0x80},
+{0x3a0f,0x38},
+{0x3a10,0x30},
+{0x3a1b,0x3a},
+{0x3a1e,0x2e},
+{0x3a11,0x60},
+{0x3a1f,0x10},
+{0x5688,0xa6},
+{0x5689,0x6a},
+{0x568a,0xea},
+{0x568b,0xae},
+{0x568c,0xa6},
+{0x568d,0x6a},
+{0x568e,0x62},
+{0x568f,0x26},
+{0x5583,0x40},
+{0x5584,0x40},
+{0x5580,0x02},
+{0x5000,0xcf},
+{0x5800,0x27},
+{0x5801,0x19},
+{0x5802,0x12},
+{0x5803,0x0f},
+{0x5804,0x10},
+{0x5805,0x15},
+{0x5806,0x1e},
+{0x5807,0x2f},
+{0x5808,0x15},
+{0x5809,0x0d},
+{0x580a,0x0a},
+{0x580b,0x09},
+{0x580c,0x0a},
+{0x580d,0x0c},
+{0x580e,0x12},
+{0x580f,0x19},
+{0x5810,0x0b},
+{0x5811,0x07},
+{0x5812,0x04},
+{0x5813,0x03},
+{0x5814,0x03},
+{0x5815,0x06},
+{0x5816,0x0a},
+{0x5817,0x0f},
+{0x5818,0x0a},
+{0x5819,0x05},
+{0x581a,0x01},
+{0x581b,0x00},
+{0x581c,0x00},
+{0x581d,0x03},
+{0x581e,0x08},
+{0x581f,0x0c},
+{0x5820,0x0a},
+{0x5821,0x05},
+{0x5822,0x01},
+{0x5823,0x00},
+{0x5824,0x00},
+{0x5825,0x03},
+{0x5826,0x08},
+{0x5827,0x0c},
+{0x5828,0x0e},
+{0x5829,0x08},
+{0x582a,0x06},
+{0x582b,0x04},
+{0x582c,0x05},
+{0x582d,0x07},
+{0x582e,0x0b},
+{0x582f,0x12},
+{0x5830,0x18},
+{0x5831,0x10},
+{0x5832,0x0c},
+{0x5833,0x0a},
+{0x5834,0x0b},
+{0x5835,0x0e},
+{0x5836,0x15},
+{0x5837,0x19},
+{0x5838,0x32},
+{0x5839,0x1f},
+{0x583a,0x18},
+{0x583b,0x16},
+{0x583c,0x17},
+{0x583d,0x1e},
+{0x583e,0x26},
+{0x583f,0x53},
+{0x5840,0x10},
+{0x5841,0x0f},
+{0x5842,0x0d},
+{0x5843,0x0c},
+{0x5844,0x0e},
+{0x5845,0x09},
+{0x5846,0x11},
+{0x5847,0x10},
+{0x5848,0x10},
+{0x5849,0x10},
+{0x584a,0x10},
+{0x584b,0x0e},
+{0x584c,0x10},
+{0x584d,0x10},
+{0x584e,0x11},
+{0x584f,0x10},
+{0x5850,0x0f},
+{0x5851,0x0c},
+{0x5852,0x0f},
+{0x5853,0x10},
+{0x5854,0x10},
+{0x5855,0x0f},
+{0x5856,0x0e},
+{0x5857,0x0b},
+{0x5858,0x10},
+{0x5859,0x0d},
+{0x585a,0x0d},
+{0x585b,0x0c},
+{0x585c,0x0c},
+{0x585d,0x0c},
+{0x585e,0x0b},
+{0x585f,0x0c},
+{0x5860,0x0c},
+{0x5861,0x0c},
+{0x5862,0x0d},
+{0x5863,0x08},
+{0x5864,0x11},
+{0x5865,0x18},
+{0x5866,0x18},
+{0x5867,0x19},
+{0x5868,0x17},
+{0x5869,0x19},
+{0x586a,0x16},
+{0x586b,0x13},
+{0x586c,0x13},
+{0x586d,0x12},
+{0x586e,0x13},
+{0x586f,0x16},
+{0x5870,0x14},
+{0x5871,0x12},
+{0x5872,0x10},
+{0x5873,0x11},
+{0x5874,0x11},
+{0x5875,0x16},
+{0x5876,0x14},
+{0x5877,0x11},
+{0x5878,0x10},
+{0x5879,0x0f},
+{0x587a,0x10},
+{0x587b,0x14},
+{0x587c,0x13},
+{0x587d,0x12},
+{0x587e,0x11},
+{0x587f,0x11},
+{0x5880,0x12},
+{0x5881,0x15},
+{0x5882,0x14},
+{0x5883,0x15},
+{0x5884,0x15},
+{0x5885,0x15},
+{0x5886,0x13},
+{0x5887,0x17},
+{0x3710,0x10},
+{0x3632,0x51},
+{0x3702,0x10},
+{0x3703,0xb2},
+{0x3704,0x18},
+{0x370b,0x40},
+{0x370d,0x03},
+{0x3631,0x01},
+{0x3632,0x52},
+{0x3606,0x24},
+{0x3620,0x96},
+{0x5785,0x07},
+{0x3a13,0x30},
+{0x3600,0x52},
+{0x3604,0x48},
+{0x3606,0x1b},
+{0x370d,0x0b},
+{0x370f,0xc0},
+{0x3709,0x01},
+{0x3823,0x00},
+{0x5007,0x00},
+{0x5009,0x00},
+{0x5011,0x00},
+{0x5013,0x00},
+{0x519e,0x00},
+{0x5086,0x00},
+{0x5087,0x00},
+{0x5088,0x00},
+{0x5089,0x00},
+{0x302b,0x00},
+{0x3621,0x87},
+{0x3a00,0x78},
+};
+
+// Capture Configuration Update setting
+static CAM_REG_ADDR_VAL_TYPE	cam_capture_5M_reg_setup[]=
+{
+//OV5642 Capture 5M Key setting 2592 1944
+{0x3406, 0x01},
+{0x3003, 0x00},
+{0x3005, 0xFF},
+{0x3006, 0xFF},
+{0x3007, 0x3F},
+{0x3010, 0x10}, 
+{0x3011, 0x08},
+{0x3012, 0x00},
+//{0x350C, 0x07},
+//{0x350D, 0xD0},
+{0x3602, 0xE4},
+{0x3612, 0xAC},
+{0x3613, 0x44},
+{0x3621, 0x09},//;29	;Mirror & Flip
+{0x3622, 0x60},
+{0x3623, 0x22},
+{0x3604, 0x60},
+{0x3705, 0xDA},
+{0x370A, 0x80},
+{0x370D, 0x03},
+{0x3801, 0x8A},
+{0x3803, 0x0A},
+{0x3804, 0x0A},
+{0x3805, 0x20},
+{0x3806, 0x07},
+{0x3807, 0x98},
+{0x3808, 0x0A},
+{0x3809, 0x20},
+{0x380A, 0x07},
+{0x380B, 0x98},
+{0x380C, 0x0C},
+{0x380D, 0x80},
+{0x380E, 0x07},
+{0x380F, 0xD0},
+{0x3824, 0x11},
+{0x3825, 0xAC},
+{0x3827, 0x0A},
+{0x3A08, 0x09},
+{0x3A09, 0x60},
+{0x3A0A, 0x07},
+{0x3A0B, 0xD0},
+{0x3A0D, 0x10},
+{0x3A0E, 0x0D},
+{0x3A1A, 0x04},
+{0x460B, 0x35},
+{0x471D, 0x00},
+{0x4713, 0x03},
+{0x5001, 0xFF},
+{0x589B, 0x00},
+{0x589A, 0xC0},
+{0x4407, 0x04},
+{0x589B, 0x00},
+{0x589A, 0xC0},
+{0x3002, 0x1C},
+{0x460C, 0x20},
+{0x471C, 0xD0},
+{0x4721, 0x01},
+{0x3815, 0x01},
+{0x501F, 0x00},
+{0x5002, 0xE0},
+{0x4300, 0x30},
+{0x3818, 0xc0},//;A0	;Mirror&Flip
+{0x3810, 0xC2},
+};
+
+//QXGA_Default 2048 1536
+static CAM_REG_ADDR_VAL_TYPE cam_capture_qxga_reg_setup[]=
+{
+	//5M to QXGA Key 2048 1536
+	//5M            
+{0x3406,0x01},           
+{0x3003,0x00},           
+{0x3005,0xFF},           
+{0x3006,0xFF},           
+{0x3007,0x3F},           
+{0x3011,0x08},           
+{0x3012,0x00},           
+{0x350C,0x07},           
+{0x350D,0xD0},           
+{0x3602,0xE4},           
+{0x3612,0xAC},           
+{0x3613,0x44},           
+{0x3621,0x09},//29	//Mirror &,0xFlip
+{0x3622,0x60},           
+{0x3623,0x22},           
+{0x3604,0x60},           
+{0x3705,0xDA},           
+{0x370A,0x80},           
+{0x370D,0x03},           
+{0x3801,0x8A},           
+{0x3803,0x0A},           
+{0x3804,0x0A},           
+{0x3805,0x20},           
+{0x3806,0x07},           
+{0x3807,0x98},           
+{0x3808,0x0A},           
+{0x3809,0x20},           
+{0x380A,0x07},           
+{0x380B,0x98},           
+{0x380C,0x0C},           
+{0x380D,0x80},           
+{0x380E,0x07},           
+{0x380F,0xD0},           
+{0x3824,0x11},           
+{0x3825,0xAC},           
+{0x3827,0x0A},           
+{0x3A08,0x09},           
+{0x3A09,0x60},           
+{0x3A0A,0x07},           
+{0x3A0B,0xD0},           
+{0x3A0D,0x10},           
+{0x3A0E,0x0D},           
+{0x3A1A,0x04},           
+{0x460B,0x35},           
+{0x471D,0x00},           
+{0x4713,0x03},           
+{0x5001,0xFF},           
+{0x589B,0x00},           
+{0x589A,0xC0},           
+{0x4407,0x04},           
+{0x589B,0x00},           
+{0x589A,0xC0},           
+{0x3002,0x1C},           
+{0x460C,0x20},           
+{0x471C,0xD0},           
+{0x4721,0x01},           
+{0x3815,0x01},           
+{0x501F,0x00},           
+{0x5002,0xE0},           
+{0x4300,0x30},           
+{0x3818,0xC0},//A0	//Mirror&Flip
+{0x3810,0xC2},           
+//            
+// QXGA key                                    
+{0x3800,0x01},           
+{0x3801,0x8A},           
+{0x3802,0x00},           
+{0x3803,0x0A},           
+{0x3804,0x0A},           
+{0x3805,0x20},           
+{0x3806,0x07},           
+{0x3807,0x98},           
+{0x3808,0x08},           
+{0x3809,0x00},           
+{0x380A,0x06},           
+{0x380B,0x00},           
+{0x380C,0x0C},           
+{0x380D,0x80},           
+{0x380E,0x07},           
+{0x380F,0xD0},           
+{0x5001,0x7F},           
+{0x5680,0x00},           
+{0x5681,0x00},           
+{0x5682,0x0A},           
+{0x5683,0x20},           
+{0x5684,0x00},           
+{0x5685,0x00},           
+{0x5686,0x07},           
+{0x5687,0x98},             
+{0x3010,0x20},
+};
+
+
+//UXGA_Default 1600 1200
+static CAM_REG_ADDR_VAL_TYPE	cam_capture_uxga_reg_setup[]=
+{
+{0x3103, 0x93},
+{0x3008, 0x82},
+{0x3017, 0x7f},
+{0x3018, 0xfc},
+{0x3810, 0xc2},
+{0x3615, 0xf0},
+{0x3000, 0x00},
+{0x3001, 0x00},
+{0x3002, 0x00},
+{0x3003, 0x00},
+{0x3004, 0xff},
+{0x3030, 0x2b},
+{0x3011, 0x08},
+{0x3010, 0x00},
+{0x3604, 0x60},
+{0x3622, 0x60},
+{0x3621, 0x09},
+{0x3709, 0x00},
+{0x4000, 0x21},
+{0x401d, 0x22},
+{0x3600, 0x54},
+{0x3605, 0x04},
+{0x3606, 0x3f},
+{0x3c01, 0x80},
+{0x300d, 0x22},
+{0x3623, 0x22},
+{0x5000, 0x4f},
+{0x5020, 0x04},
+{0x5181, 0x79},
+{0x5182, 0x00},
+{0x5185, 0x22},
+{0x5197, 0x01},
+{0x5500, 0x0a},
+{0x5504, 0x00},
+{0x5505, 0x7f},
+{0x5080, 0x08},
+{0x300e, 0x18},
+{0x4610, 0x00},
+{0x471d, 0x05},
+{0x4708, 0x06},
+{0x370c, 0xa0},
+{0x3808, 0x0a},
+{0x3809, 0x20},
+{0x380a, 0x07},
+{0x380b, 0x98},
+{0x380c, 0x0c},
+{0x380d, 0x80},
+{0x380e, 0x07},
+{0x380f, 0xd0},
+{0x5687, 0x94},
+{0x501f, 0x00},
+{0x5000, 0x4f},
+{0x5001, 0xcf},
+{0x4300, 0x30},
+{0x4300, 0x30},
+{0x460b, 0x35},
+{0x471d, 0x00},
+{0x3002, 0x0c},
+{0x3002, 0x00},
+{0x4713, 0x03},
+{0x471c, 0x50},
+{0x4721, 0x02},
+{0x4402, 0x90},
+{0x460c, 0x22},
+{0x3815, 0x44},
+{0x3503, 0x07},
+{0x3501, 0x73},
+{0x3502, 0x80},
+{0x350b, 0x00},
+{0x3818, 0xc8},
+{0x3801, 0x88},
+{0x3824, 0x11},
+{0x3a00, 0x78},
+{0x3a1a, 0x04},
+{0x3a13, 0x30},
+{0x3a18, 0x00},
+{0x3a19, 0x7c},
+{0x3a08, 0x12},
+{0x3a09, 0xc0},
+{0x3a0a, 0x0f},
+{0x3a0b, 0xa0},
+{0x350c, 0x07},
+{0x350d, 0xd0},
+{0x3a0d, 0x08},
+{0x3a0e, 0x06},
+{0x3500, 0x00},
+{0x3501, 0x00},
+{0x3502, 0x00},
+{0x350a, 0x00},
+{0x350b, 0x00},
+{0x3503, 0x00},
+{0x3a0f, 0x3c},
+{0x3a10, 0x32},
+{0x3a1b, 0x3c},
+{0x3a1e, 0x32},
+{0x3a11, 0x80},
+{0x3a1f, 0x20},
+{0x3030, 0x2b},
+{0x3a02, 0x00},
+{0x3a03, 0x7d},
+{0x3a04, 0x00},
+{0x3a14, 0x00},
+{0x3a15, 0x7d},
+{0x3a16, 0x00},
+{0x3a00, 0x78},
+{0x3a08, 0x09},
+{0x3a09, 0x60},
+{0x3a0a, 0x07},
+{0x3a0b, 0xd0},
+{0x3a0d, 0x10},
+{0x3a0e, 0x0d},
+{0x4407, 0x04},
+{0x5193, 0x70},
+{0x589b, 0x00},
+{0x589a, 0xc0},
+{0x4001, 0x42},
+{0x401c, 0x06},
+{0x3825, 0xac},
+{0x3827, 0x0c},
+{0x528a, 0x01},
+{0x528b, 0x04},
+{0x528c, 0x08},
+{0x528d, 0x10},
+{0x528e, 0x20},
+{0x528f, 0x28},
+{0x5290, 0x30},
+{0x5292, 0x00},
+{0x5293, 0x01},
+{0x5294, 0x00},
+{0x5295, 0x04},
+{0x5296, 0x00},
+{0x5297, 0x08},
+{0x5298, 0x00},
+{0x5299, 0x10},
+{0x529a, 0x00},
+{0x529b, 0x20},
+{0x529c, 0x00},
+{0x529d, 0x28},
+{0x529e, 0x00},
+{0x529f, 0x30},
+{0x5282, 0x00},
+{0x5300, 0x00},
+{0x5301, 0x20},
+{0x5302, 0x00},
+{0x5303, 0x7c},
+{0x530c, 0x00},
+{0x530d, 0x0c},
+{0x530e, 0x20},
+{0x530f, 0x80},
+{0x5310, 0x20},
+{0x5311, 0x80},
+{0x5308, 0x20},
+{0x5309, 0x40},
+{0x5304, 0x00},
+{0x5305, 0x30},
+{0x5306, 0x00},
+{0x5307, 0x80},
+{0x5314, 0x08},
+{0x5315, 0x20},
+{0x5319, 0x30},
+{0x5316, 0x10},
+{0x5317, 0x00},
+{0x5318, 0x02},
+{0x5380, 0x01},
+{0x5381, 0x00},
+{0x5382, 0x00},
+{0x5383, 0x4e},
+{0x5384, 0x00},
+{0x5385, 0x0f},
+{0x5386, 0x00},
+{0x5387, 0x00},
+{0x5388, 0x01},
+{0x5389, 0x15},
+{0x538a, 0x00},
+{0x538b, 0x31},
+{0x538c, 0x00},
+{0x538d, 0x00},
+{0x538e, 0x00},
+{0x538f, 0x0f},
+{0x5390, 0x00},
+{0x5391, 0xab},
+{0x5392, 0x00},
+{0x5393, 0xa2},
+{0x5394, 0x08},
+{0x5480, 0x14},
+{0x5481, 0x21},
+{0x5482, 0x36},
+{0x5483, 0x57},
+{0x5484, 0x65},
+{0x5485, 0x71},
+{0x5486, 0x7d},
+{0x5487, 0x87},
+{0x5488, 0x91},
+{0x5489, 0x9a},
+{0x548a, 0xaa},
+{0x548b, 0xb8},
+{0x548c, 0xcd},
+{0x548d, 0xdd},
+{0x548e, 0xea},
+{0x548f, 0x1d},
+{0x5490, 0x05},
+{0x5491, 0x00},
+{0x5492, 0x04},
+{0x5493, 0x20},
+{0x5494, 0x03},
+{0x5495, 0x60},
+{0x5496, 0x02},
+{0x5497, 0xb8},
+{0x5498, 0x02},
+{0x5499, 0x86},
+{0x549a, 0x02},
+{0x549b, 0x5b},
+{0x549c, 0x02},
+{0x549d, 0x3b},
+{0x549e, 0x02},
+{0x549f, 0x1c},
+{0x54a0, 0x02},
+{0x54a1, 0x04},
+{0x54a2, 0x01},
+{0x54a3, 0xed},
+{0x54a4, 0x01},
+{0x54a5, 0xc5},
+{0x54a6, 0x01},
+{0x54a7, 0xa5},
+{0x54a8, 0x01},
+{0x54a9, 0x6c},
+{0x54aa, 0x01},
+{0x54ab, 0x41},
+{0x54ac, 0x01},
+{0x54ad, 0x20},
+{0x54ae, 0x00},
+{0x54af, 0x16},
+{0x54b0, 0x01},
+{0x54b1, 0x20},
+{0x54b2, 0x00},
+{0x54b3, 0x10},
+{0x54b4, 0x00},
+{0x54b5, 0xf0},
+{0x54b6, 0x00},
+{0x54b7, 0xdf},
+{0x5402, 0x3f},
+{0x5403, 0x00},
+{0x3406, 0x00},
+{0x5180, 0xff},
+{0x5181, 0x52},
+{0x5182, 0x11},
+{0x5183, 0x14},
+{0x5184, 0x25},
+{0x5185, 0x24},
+{0x5186, 0x06},
+{0x5187, 0x08},
+{0x5188, 0x08},
+{0x5189, 0x7c},
+{0x518a, 0x60},
+{0x518b, 0xb2},
+{0x518c, 0xb2},
+{0x518d, 0x44},
+{0x518e, 0x3d},
+{0x518f, 0x58},
+{0x5190, 0x46},
+{0x5191, 0xf8},
+{0x5192, 0x04},
+{0x5193, 0x70},
+{0x5194, 0xf0},
+{0x5195, 0xf0},
+{0x5196, 0x03},
+{0x5197, 0x01},
+{0x5198, 0x04},
+{0x5199, 0x12},
+{0x519a, 0x04},
+{0x519b, 0x00},
+{0x519c, 0x06},
+{0x519d, 0x82},
+{0x519e, 0x00},
+{0x5025, 0x80},
+{0x3a0f, 0x38},
+{0x3a10, 0x30},
+{0x3a1b, 0x3a},
+{0x3a1e, 0x2e},
+{0x3a11, 0x60},
+{0x3a1f, 0x10},
+{0x5688, 0xa6},
+{0x5689, 0x6a},
+{0x568a, 0xea},
+{0x568b, 0xae},
+{0x568c, 0xa6},
+{0x568d, 0x6a},
+{0x568e, 0x62},
+{0x568f, 0x26},
+{0x5583, 0x40},
+{0x5584, 0x40},
+{0x5580, 0x02},
+{0x5000, 0xcf},
+{0x5800, 0x27},
+{0x5801, 0x19},
+{0x5802, 0x12},
+{0x5803, 0x0f},
+{0x5804, 0x10},
+{0x5805, 0x15},
+{0x5806, 0x1e},
+{0x5807, 0x2f},
+{0x5808, 0x15},
+{0x5809, 0x0d},
+{0x580a, 0x0a},
+{0x580b, 0x09},
+{0x580c, 0x0a},
+{0x580d, 0x0c},
+{0x580e, 0x12},
+{0x580f, 0x19},
+{0x5810, 0x0b},
+{0x5811, 0x07},
+{0x5812, 0x04},
+{0x5813, 0x03},
+{0x5814, 0x03},
+{0x5815, 0x06},
+{0x5816, 0x0a},
+{0x5817, 0x0f},
+{0x5818, 0x0a},
+{0x5819, 0x05},
+{0x581a, 0x01},
+{0x581b, 0x00},
+{0x581c, 0x00},
+{0x581d, 0x03},
+{0x581e, 0x08},
+{0x581f, 0x0c},
+{0x5820, 0x0a},
+{0x5821, 0x05},
+{0x5822, 0x01},
+{0x5823, 0x00},
+{0x5824, 0x00},
+{0x5825, 0x03},
+{0x5826, 0x08},
+{0x5827, 0x0c},
+{0x5828, 0x0e},
+{0x5829, 0x08},
+{0x582a, 0x06},
+{0x582b, 0x04},
+{0x582c, 0x05},
+{0x582d, 0x07},
+{0x582e, 0x0b},
+{0x582f, 0x12},
+{0x5830, 0x18},
+{0x5831, 0x10},
+{0x5832, 0x0c},
+{0x5833, 0x0a},
+{0x5834, 0x0b},
+{0x5835, 0x0e},
+{0x5836, 0x15},
+{0x5837, 0x19},
+{0x5838, 0x32},
+{0x5839, 0x1f},
+{0x583a, 0x18},
+{0x583b, 0x16},
+{0x583c, 0x17},
+{0x583d, 0x1e},
+{0x583e, 0x26},
+{0x583f, 0x53},
+{0x5840, 0x10},
+{0x5841, 0x0f},
+{0x5842, 0x0d},
+{0x5843, 0x0c},
+{0x5844, 0x0e},
+{0x5845, 0x09},
+{0x5846, 0x11},
+{0x5847, 0x10},
+{0x5848, 0x10},
+{0x5849, 0x10},
+{0x584a, 0x10},
+{0x584b, 0x0e},
+{0x584c, 0x10},
+{0x584d, 0x10},
+{0x584e, 0x11},
+{0x584f, 0x10},
+{0x5850, 0x0f},
+{0x5851, 0x0c},
+{0x5852, 0x0f},
+{0x5853, 0x10},
+{0x5854, 0x10},
+{0x5855, 0x0f},
+{0x5856, 0x0e},
+{0x5857, 0x0b},
+{0x5858, 0x10},
+{0x5859, 0x0d},
+{0x585a, 0x0d},
+{0x585b, 0x0c},
+{0x585c, 0x0c},
+{0x585d, 0x0c},
+{0x585e, 0x0b},
+{0x585f, 0x0c},
+{0x5860, 0x0c},
+{0x5861, 0x0c},
+{0x5862, 0x0d},
+{0x5863, 0x08},
+{0x5864, 0x11},
+{0x5865, 0x18},
+{0x5866, 0x18},
+{0x5867, 0x19},
+{0x5868, 0x17},
+{0x5869, 0x19},
+{0x586a, 0x16},
+{0x586b, 0x13},
+{0x586c, 0x13},
+{0x586d, 0x12},
+{0x586e, 0x13},
+{0x586f, 0x16},
+{0x5870, 0x14},
+{0x5871, 0x12},
+{0x5872, 0x10},
+{0x5873, 0x11},
+{0x5874, 0x11},
+{0x5875, 0x16},
+{0x5876, 0x14},
+{0x5877, 0x11},
+{0x5878, 0x10},
+{0x5879, 0x0f},
+{0x587a, 0x10},
+{0x587b, 0x14},
+{0x587c, 0x13},
+{0x587d, 0x12},
+{0x587e, 0x11},
+{0x587f, 0x11},
+{0x5880, 0x12},
+{0x5881, 0x15},
+{0x5882, 0x14},
+{0x5883, 0x15},
+{0x5884, 0x15},
+{0x5885, 0x15},
+{0x5886, 0x13},
+{0x5887, 0x17},
+{0x3710, 0x10},
+{0x3632, 0x51},
+{0x3702, 0x10},
+{0x3703, 0xb2},
+{0x3704, 0x18},
+{0x370b, 0x40},
+{0x370d, 0x03},
+{0x3631, 0x01},
+{0x3632, 0x52},
+{0x3606, 0x24},
+{0x3620, 0x96},
+{0x5785, 0x07},
+{0x3a13, 0x30},
+{0x3600, 0x52},
+{0x3604, 0x48},
+{0x3606, 0x1b},
+{0x370d, 0x0b},
+{0x370f, 0xc0},
+{0x3709, 0x01},
+{0x3823, 0x00},
+{0x5007, 0x00},
+{0x5009, 0x00},
+{0x5011, 0x00},
+{0x5013, 0x00},
+{0x519e, 0x00},
+{0x5086, 0x00},
+{0x5087, 0x00},
+{0x5088, 0x00},
+{0x5089, 0x00},
+{0x302b, 0x00},
+//UXGA   
+{0x3800, 0x01},
+{0x3801, 0x8A},
+{0x3802, 0x00},
+{0x3803, 0x0A},
+{0x3804, 0x0A},
+{0x3805, 0x20},
+{0x3806, 0x07},
+{0x3807, 0x98},
+{0x3808, 0x06},
+{0x3809, 0x40},
+{0x380A, 0x04},
+{0x380B, 0xB0},
+{0x380C, 0x0C},
+{0x380D, 0x80},
+{0x380E, 0x07},
+{0x380F, 0xD0},
+{0x5001, 0x7F},
+{0x5680, 0x00},
+{0x5681, 0x00},
+{0x5682, 0x0A},
+{0x5683, 0x20},
+{0x5684, 0x00},
+{0x5685, 0x00},
+{0x5686, 0x07},
+{0x5687, 0x98},
+};
+
+//1024 768(YUV) 30fps
+static CAM_REG_ADDR_VAL_TYPE	cam_preview_xga_reg_setup[]=
+{
+//1024x768_YUV_30fps Key preview
+{0x3002, 0x5c},
+{0x3003, 0x02},  
+{0x3005, 0xff}, 
+{0x3006, 0x43}, 
+{0x3007, 0x37}, 
+{0x3011, 0x0a}, 
+{0x3012, 0x02}, 
+//{0x350c, 0x03},  
+//{0x350d, 0xf0}, 
+{0x3602, 0xfc}, 
+{0x3612, 0xff}, 
+{0x3613, 0x00}, 
+{0x3621, 0x87}, 
+{0x3622, 0x60}, 
+{0x3623, 0x01}, 
+{0x3604, 0x48}, 
+{0x3705, 0xdb}, 
+{0x370a, 0x81}, 
+{0x370d, 0x0b}, 
+{0x3801, 0x50}, 
+{0x3803, 0x08},  
+{0x3804, 0x05},  
+{0x3805, 0x00},  
+{0x3806, 0x03},  
+{0x3807, 0xc0}, 
+{0x3808, 0x04},  //;03
+{0x3809, 0x00},  //;20
+{0x380a, 0x03},  //;02
+{0x380b, 0x00},  //;58
+{0x380c, 0x07}, 
+{0x380d, 0xc0}, 
+{0x380e, 0x03},  
+{0x380f, 0xf0}, 
+{0x3810, 0x80}, 
+{0x3815, 0x02},  
+{0x3818, 0xc1}, 
+{0x3824, 0x11}, 
+{0x3825, 0xb0}, 
+{0x3827, 0x08},  
+{0x3a08, 0x12}, 
+{0x3a09, 0xe0},   //{0x3a09, 0x30},
+{0x3a0a, 0x0f}, 
+{0x3a0b, 0xa0}, 
+{0x3a0d, 0x04}, 
+{0x3a0e, 0x03},  //{0x3a0e, 0x02},
+{0x3a1a, 0x05}, 
+{0x401c, 0x04}, 
+{0x460b, 0x37}, 
+{0x471d, 0x05},  
+{0x4713, 0x03},  
+{0x471c, 0xd0}, 
+{0x5682, 0x05},  
+{0x5683, 0x00},  
+{0x5686, 0x03},  
+{0x5687, 0xbc}, 
+{0x5001, 0xff},
+{0x589b, 0x04},  
+{0x589a, 0xc5}, 
+{0x4407, 0x04},  
+{0x589b, 0x00},  
+{0x589a, 0xc0}, 
+{0x3002, 0x0c}, 
+{0x3002, 0x00}, 
+//{0x3503, 0x00}, 
+{0x3010, 0x00},  //;for OV538
+//{0x3503, 0x00},  //; AGC_AEC
+//{0x3406, 0x00},  //; AWB
+};
+
+// Pewview Configuration Update setting
+static CAM_REG_ADDR_VAL_TYPE	cam_preview_VGA_reg_setup[]=
+{
+// VGA YUV Preview Key setting
+{0x260C,0x02},//,0xdriver,0xcurrent
+{0x3002,0x5c},               
+{0x3003,0x00},               
+{0x3005,0xff},               
+{0x3006,0x43},               
+{0x3007,0x37},               
+{0x300F,0x06},               
+{0x3011,0x08},               
+{0x3012,0x00},               
+//{0x350C,0x03},               
+//{0x350D,0xe8},               
+{0x3602,0xfc},               
+{0x3612,0xff},               
+{0x3613,0x00},               
+{0x3621,0x87},               
+{0x3622,0x60},               
+{0x3623,0x01},               
+{0x3604,0x48},               
+{0x3705,0xd9},               
+{0x370A,0x81},               
+{0x370D,0x0b},               
+{0x3801,0x50},               
+{0x3803,0x08},               
+{0x3804,0x05},               
+{0x3805,0x00},               
+{0x3806,0x03},               
+{0x3807,0xc0},               
+{0x3808,0x02},               
+{0x3809,0x80},               
+{0x380A,0x01},               
+{0x380B,0xe0},               
+{0x380C,0x0c},               
+{0x380D,0x80},               
+{0x380E,0x03},               
+{0x380F,0xe8},               
+{0x3810,0x40},               
+{0x3815,0x44},               
+{0x3818,0xc1},               
+{0x3824,0x11},               
+{0x3825,0xb4},               
+{0x3827,0x08},               
+{0x3A08,0x09},               
+{0x3A09,0x60},               
+{0x3A0A,0x07},               
+{0x3A0B,0xd0},               
+{0x3A0D,0x08},               
+{0x3A0E,0x06},               
+{0x3A1A,0x05},               
+{0x460B,0x37},               
+{0x471D,0x05},               
+{0x4713,0x02},               
+{0x471C,0xd0},               
+{0x5682,0x05},               
+{0x5683,0x00},               
+{0x5686,0x03},               
+{0x5687,0xbc},               
+{0x5001,0xff},               
+{0x4407,0x0c},               
+{0x589B,0x04},               
+{0x589A,0xc5},               
+{0x3002,0x0c},               
+{0x3002,0x00},               
+//{0x3503,0x00},               
+//{0x3406,0x00},	//Enable AWB
+{0x3010,0x00},               
+{0x460C,0x22},                                        
+{0x3030,0x2b},         
+};
+
+static CAM_REG_ADDR_VAL_TYPE	ov5642_exposure_mode_center_weighted[]=
+{
+{0x5688, 0x00},
+{0x5689, 0x00},
+{0x568a, 0x10},
+{0x568b, 0x01},
+{0x568c, 0x10},
+{0x568d, 0x01},
+{0x568e, 0x00},
+{0x568f, 0x00},
+};
+
+static CAM_REG_ADDR_VAL_TYPE	ov5642_exposure_mode_spot_metering[]=
+{
+{0x5688, 0x62},
+{0x5689, 0x26},
+{0x568a, 0xe6},
+{0x568b, 0x6e},
+{0x568c, 0xea},
+{0x568d, 0xae},
+{0x568e, 0xa6},
+{0x568f, 0x6a},
+};
+
+static CAM_REG_ADDR_VAL_TYPE	ov5642_exposure_mode_frame_avg[]=
+{
+{0x5688, 0x11},
+{0x5689, 0x11},
+{0x568a, 0x11},
+{0x568b, 0x11},
+{0x568c, 0x11},
+{0x568d, 0x11},
+{0x568e, 0x11},
+{0x568f, 0x11},
+};
+
+static uint16_t Contrast_Value = 0x00;
+static uint16_t Saturation_Value = 0x64;
+static uint16_t Sharpness_Value = 0x32;
+static uint8_t Stored_PreviewMaxlineHigh = 0x03;
+static uint8_t Stored_PreviewMaxlineLow = 0xf0;
+static uint8_t preview_brightness = 130;
+static uint8_t capture_brightness = 105;
+static uint8_t Stored_Nightmode_Multiple = 0x01; 
+static uint8_t init_retry = 0; 
+static uint8_t preview_retry = 0; 
+
+static uint16_t Preview_Resolution_Value = OV5642_DEFAULT_PREVIEW; 
+
+static int Brightness_level;//Ouyang@CCI
+static int32_t ISO_level = 0;
+
+#if 0
+static CAM_REG_ADDR_VAL_TYPE	cam_awb_auto[]=
+{
+{0x700004D2, 0x077F},		// #REG_TC_DBG_AutoAlgEnBits, AWB On
+};
+
+static CAM_REG_ADDR_VAL_TYPE	cam_wb_cloudy[]=
+{
+{0x700004D2, 0x0777},		// #REG_TC_DBG_AutoAlgEnBits, AWB Off
+{0x700004A0, 0x07A0},		// #REG_SF_USER_Rgain
+{0x700004A2, 0x0001}, 
+{0x700004A4, 0x0400},		// #REG_SF_USER_Ggain
+{0x700004A6, 0x0001},
+{0x700004A8, 0x0480},		// #REG_SF_USER_Bgain
+{0x700004AA, 0x0001},
+};
+
+static CAM_REG_ADDR_VAL_TYPE	cam_wb_horizon[]=
+{
+{0x700004D2, 0x0777},		// #REG_TC_DBG_AutoAlgEnBits, AWB Off
+{0x700004A0, 0x03B3},		// #REG_SF_USER_Rgain
+{0x700004A2, 0x0001}, 
+{0x700004A4, 0x0400},		// #REG_SF_USER_Ggain
+{0x700004A6, 0x0001},
+{0x700004A8, 0x0A28},		// #REG_SF_USER_Bgain
+{0x700004AA, 0x0001},
+};
+
+static CAM_REG_ADDR_VAL_TYPE	cam_wb_fluorescent[]=
+{
+{0x700004D2, 0x0777},		// #REG_TC_DBG_AutoAlgEnBits, AWB Off
+{0x700004A0, 0x05D1},		// #REG_SF_USER_Rgain
+{0x700004A2, 0x0001}, 
+{0x700004A4, 0x0400},		// #REG_SF_USER_Ggain
+{0x700004A6, 0x0001},
+{0x700004A8, 0x074C},		// #REG_SF_USER_Bgain
+{0x700004AA, 0x0001},
+};
+
+static CAM_REG_ADDR_VAL_TYPE	cam_wb_tungsten[]=
+{
+{0x700004D2, 0x0777},		// #REG_TC_DBG_AutoAlgEnBits, AWB Off
+{0x700004A0, 0x0433},		// #REG_SF_USER_Rgain
+{0x700004A2, 0x0001}, 
+{0x700004A4, 0x0400},		// #REG_SF_USER_Ggain
+{0x700004A6, 0x0001},
+{0x700004A8, 0x0828},		// #REG_SF_USER_Bgain
+{0x700004AA, 0x0001},
+};
+
+static CAM_REG_ADDR_VAL_TYPE	cam_wb_daylight[]=
+{
+{0x700004D2, 0x0777},		// #REG_TC_DBG_AutoAlgEnBits, AWB Off
+{0x700004A0, 0x06BB},		// #REG_SF_USER_Rgain
+{0x700004A2, 0x0001}, 
+{0x700004A4, 0x0400},		// #REG_SF_USER_Ggain
+{0x700004A6, 0x0001},
+{0x700004A8, 0x04D0},		// #REG_SF_USER_Bgain
+{0x700004AA, 0x0001},
+};
+#endif
+#if 0
+static CAM_REG_ADDR_VAL_TYPE	cam_extra_mode_beach[]=
+{
+/*Color temperature of beach mode is above 5500K*/
+{awbb_GridCorr_R_1__1_, 0x0000},
+{awbb_GridCorr_R_2__1_, 0xFFDD},
+{awbb_GridCorr_B_1__1_, 0x0000},
+{awbb_GridCorr_B_2__1_, 0x0011},
+};	
+
+static CAM_REG_ADDR_VAL_TYPE	cam_extra_mode_night[]=
+{
+{lt_uMaxExp1, 0x3415},
+{lt_uMaxExp2, 0xC350},
+{evt1, 0xFFFF},
+{evt1_lt_uMaxExp4, 0x86A0},
+{0x70001682, 0x0003},
+{lt_uCapMaxExp1, 0x3415},
+{lt_uCapMaxExp2, 0xC350},
+{evt1_lt_uCapMaxExp3, 0xFFFF},
+{evt1_lt_uCapMaxExp4, 0x86A0},
+{0x7000168A, 0x0003},
+{lt_uMaxAnGain1, 0x0180},
+{lt_uMaxAnGain2, 0x0250},
+{evt1_lt_uMaxAnGain3, 0x0340},
+{evt1_lt_uMaxAnGain4, 0x0820},
+{lt_uMaxDigGain, 0x0200},
+};	
+
+static CAM_REG_ADDR_VAL_TYPE	cam_extra_mode_night_break[]=
+{
+{lt_uMaxExp1, 0x5DC0},
+{0x70000532, 0x0000},
+{lt_uMaxExp2, 0x6D60},
+{0x70000536, 0x0000},
+{evt1_lt_uMaxExp3, 0x9C40},
+{0x7000167E, 0x0000},
+{evt1_lt_uMaxExp4, 0xBB80},
+{0x70001682, 0x0000},
+{lt_uCapMaxExp1, 0x5DC0},
+{0x7000053A ,0000},
+{lt_uCapMaxExp2, 0x6D60},
+{0x7000053E, 0x0000},
+{evt1_lt_uCapMaxExp3, 0x9C40},
+{0x70001686, 0x0000},
+{evt1_lt_uCapMaxExp4, 0xBB80},
+{0x7000168A, 0x0000},
+{lt_uMaxAnGain1, 0x0150},
+{lt_uMaxAnGain2, 0x0280},
+{evt1_lt_uMaxAnGain3, 0x02A0},
+{evt1_lt_uMaxAnGain4, 0x0800},
+{lt_uMaxDigGain, 0x0100},
+};	
+#endif
+
+static struct ov5642_ctrl *ov5642_ctrl;
+static DECLARE_WAIT_QUEUE_HEAD(ov5642_wait_queue);
+DEFINE_MUTEX(ov5642_mutex);
+
+void ov5642_power_enable(void)
+{
+       int rc;
+       struct vreg *vreg_cam;
+       cci_smem_value_t *smem_cci_smem_value;
+       printk("#### %s ####\n", __FUNCTION__);
+
+       vreg_cam = vreg_get(0, "gp2");  //I/O used
+       rc = vreg_enable(vreg_cam);
+       if (rc)
+               printk("#### vreg enable gp2 level failed ####\n");
+       rc = vreg_set_level(vreg_cam,2600);
+       if (rc)
+               printk("#### vreg set gp2 level failed ####\n");
+       mdelay(1);
+
+       vreg_cam = vreg_get(0, "gp3"); //ACORE used
+       rc = vreg_enable(vreg_cam);
+       if (rc)
+               printk("#### vreg enable gp3 level failed ####\n");
+       rc = vreg_set_level(vreg_cam,2800);
+       if (rc)
+               printk("#### vreg set gp3 level failed ####\n");
+       mdelay(7);
+	
+       //added by yhwang
+       smem_cci_smem_value = smem_alloc( SMEM_CCI_SMEM_VALUE, sizeof( cci_smem_value_t ));
+
+               gpio_direction_output(0, 1);//DCORE used C4
+               //printk("YHWang--pull up GPIO0\n");
+
+       //vreg_cam = vreg_get(0, "wlan"); //DCORE used C6
+       vreg_cam = vreg_get(0, "rftx"); //DCORE used C4
+       rc = vreg_enable(vreg_cam);
+       if (rc)
+               printk("#### vreg enable rftx level failed ####\n");
+       rc = vreg_set_level(vreg_cam,1500);
+       if (rc)
+               printk("#### vreg set rftx level failed ####\n");
+       mdelay(20);
+}
+
+void ov5642_power_disable(void)
+{
+    	int rc;
+    	struct vreg *vreg_cam;
+        cci_smem_value_t *smem_cci_smem_value;
+    	printk("#### %s ####\n", __FUNCTION__);
+	   
+    	vreg_cam = vreg_get(0, "rftx");	////DCORE used
+    	rc = vreg_set_level(vreg_cam,0);
+    	if (rc)
+    		printk("#### vreg set rftx level failed ####\n");
+    	rc = vreg_disable(vreg_cam);
+    	if (rc)
+    		printk("#### vreg disable rftx level failed ####\n");
+
+        //added by yhwang
+    	smem_cci_smem_value = smem_alloc( SMEM_CCI_SMEM_VALUE, sizeof( cci_smem_value_t )); 
+
+            gpio_direction_output(0, 0);//DCORE used C4
+            //printk("YHWang--pull down GPIO0\n");
+
+
+    	mdelay(20);	
+
+    	vreg_cam = vreg_get(0, "gp3");	//ACORE used
+    	rc = vreg_set_level(vreg_cam,0);
+    	if (rc)
+    		printk("#### vreg set gp3 level failed ####\n");
+    	rc = vreg_disable(vreg_cam);
+    	if (rc)
+    		printk("#### vreg disable gp3 level failed ####\n");
+
+    	mdelay(20);	
+
+    	vreg_cam = vreg_get(0, "gp2");	//I/O used
+    	rc = vreg_set_level(vreg_cam,0);
+    	if (rc)
+    		printk("#### vreg set gp2 level failed ####\n");
+    	rc = vreg_disable(vreg_cam);
+    	if (rc)
+    		printk("#### vreg disable gp2 level failed ####\n");
+	  
+}
+
+static int ov5642_i2c_rxdata(unsigned short saddr, unsigned char *rxdata,
+	int length)
+{
+	struct i2c_msg msgs[] = {
+		{
+			.addr   = saddr,
+			.flags = 0,
+			.len   = 2,
+			.buf   = rxdata,
+		},
+		{
+			.addr   = saddr,
+			.flags = I2C_M_RD,
+			.len   = length,
+			.buf   = rxdata,
+		},
+	};
+
+	if (i2c_transfer(ov5642_client->adapter, msgs, 2) < 0) {
+		CDBG("ov5642_i2c_rxdata failed!\n");
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int32_t ov5642_i2c_txdata(unsigned short saddr,
+	unsigned char *txdata, int length)
+{
+	struct i2c_msg msg[] = {
+		{
+		.addr  = saddr,
+		.flags = 0,
+		.len = length,
+		.buf = txdata,
+		},
+	};
+
+	if (i2c_transfer(ov5642_client->adapter, msg, 1) < 0) {
+		CDBG("ov5642_i2c_txdata failed\n");
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int32_t ov5642_i2c_write_b(unsigned short saddr, unsigned short waddr,
+	unsigned char bdata)
+{
+	int32_t rc = -EIO;
+	unsigned char buf[4];
+
+	memset(buf, 0, sizeof(buf));
+	buf[0] = (waddr & 0xFF00)>>8;
+	buf[1] = (waddr & 0x00FF);
+	buf[2] = bdata;
+
+	rc = ov5642_i2c_txdata(saddr, buf, 3);
+
+	if (rc < 0)
+		CDBG("i2c_write_w failed, addr = 0x%x, val = 0x%x!\n",
+			waddr, bdata);
+
+	return rc;
+}
+
+static int32_t camsensor_i2c_write_byte(unsigned short saddr, unsigned char bdata)
+{
+	int32_t rc = 0;
+	int32_t count = 0;
+	
+	do
+	{
+		rc = ov5642_i2c_write_b(ov5642_client->addr,
+			saddr,
+			bdata);
+		if(count != 0) mdelay(10);
+			count++; 
+	}while(I2C_RETRY_COUNT > count && rc != 0);
+	return rc;
+}
+
+static int32_t ov5642_i2c_write_w(unsigned short saddr, unsigned short waddr,
+	unsigned short wdata)
+{
+	int32_t rc = -EIO;
+	unsigned char buf[4];
+
+	memset(buf, 0, sizeof(buf));
+	buf[0] = (waddr & 0xFF00)>>8;
+	buf[1] = (waddr & 0x00FF);
+	buf[2] = (wdata & 0xFF00)>>8;
+	buf[3] = (wdata & 0x00FF);
+
+	rc = ov5642_i2c_txdata(saddr, buf, 4);
+
+	if (rc < 0)
+		CDBG("i2c_write_w failed, addr = 0x%x, val = 0x%x!\n",
+			waddr, wdata);
+
+	return rc;
+}
+
+static int32_t camsensor_i2c_write_word(unsigned short saddr, unsigned short sdata)
+{
+	int32_t rc = 0;
+	int32_t count = 0;
+	do
+	{
+		rc = ov5642_i2c_write_w(ov5642_client->addr,
+			saddr,
+			sdata);
+		if(count !=0)	mdelay(10);
+			count++;
+	}while(I2C_RETRY_COUNT > count && rc != 0);
+	return rc;
+}
+
+static int32_t ov5642_i2c_write_table(
+	struct ov5642_i2c_reg_conf *reg_cfg_tbl, int num)
+{
+	int i;
+	int32_t rc = -EIO;
+	for (i = 0; i < num; i++) {
+		rc = ov5642_i2c_write_b(ov5642_client->addr,
+			reg_cfg_tbl->waddr, reg_cfg_tbl->bdata);
+		if (rc < 0)
+			break;
+		reg_cfg_tbl++;
+	}
+
+	return rc;
+}
+
+static int32_t ov5642_i2c_read_b(unsigned short saddr, unsigned short raddr,
+	unsigned short *rdata)
+{
+	int32_t rc = 0;
+	unsigned char buf[4];
+
+	if (!rdata)
+		return -EIO;
+
+	memset(buf, 0, sizeof(buf));
+
+	buf[0] = (raddr & 0xFF00)>>8;
+	buf[1] = (raddr & 0x00FF);
+
+	rc = ov5642_i2c_rxdata(saddr, buf, 1);
+	if (rc < 0)
+		return rc;
+
+	*rdata = buf[0];
+
+	if (rc < 0)
+		CDBG("ov5642_i2c_read_b failed!\n");
+
+	return rc;
+}
+
+
+static int32_t ov5642_i2c_read_w(unsigned short saddr, unsigned short raddr,
+	unsigned short *rdata)
+{
+	int32_t rc = 0;
+	unsigned char buf[4];
+
+	if (!rdata)
+		return -EIO;
+
+	memset(buf, 0, sizeof(buf));
+
+	buf[0] = (raddr & 0xFF00)>>8;
+	buf[1] = (raddr & 0x00FF);
+
+	rc = ov5642_i2c_rxdata(saddr, buf, 2);
+	if (rc < 0)
+		return rc;
+
+	*rdata = buf[0] << 8 | buf[1];
+
+	if (rc < 0)
+		CDBG("ov5642_i2c_read_w failed!\n");
+
+	return rc;
+}
+
+static int32_t camsensor_i2c_read_word(unsigned short saddr, unsigned short *sdata)
+{
+	int32_t rc = 0;
+	rc = ov5642_i2c_read_w(ov5642_client->addr,
+		saddr,
+		sdata);
+	return rc;
+}
+
+static int32_t camsensor_ov5642_i2c_write(uint16_t msb_reg, uint16_t lsb_reg, uint16_t data)
+{
+	int32_t rc = 0;
+
+	
+	return rc; 
+}
+
+static int32_t camsensor_ov5642_i2c_read(uint16_t msb_reg, uint16_t lsb_reg, uint16_t *data)
+{
+	int32_t rc = 0;
+	uint16_t chip_id = 0; 
+
+	rc = ov5642_i2c_read_b(ov5642_client->addr,msb_reg, data);
+	if(rc < 0)
+	{
+		return rc;
+ 	}
+	chip_id = *data;
+	chip_id = (chip_id<<8);
+	rc = ov5642_i2c_read_b(ov5642_client->addr,lsb_reg, data);
+	if(rc < 0)
+	{
+		return rc;
+ 	}
+	chip_id = (*data | chip_id);
+	data = &chip_id;
+
+	return rc; 
+}
+
+static int32_t camsensor_i2c_read_byte(unsigned short saddr, unsigned short *sdata)
+{
+	int32_t rc = 0;
+	rc = ov5642_i2c_read_b(ov5642_client->addr,
+		saddr,
+		sdata);
+	return rc;
+}
+
+static int32_t ov5642_write_mask_reg(unsigned short offset, unsigned char data, unsigned char mask)
+{
+  int32_t rc = 0;
+  uint8_t Temp;
+  rc = camsensor_i2c_read_byte(offset, &Temp);
+  if (rc < 0)
+	  return rc;
+
+  Temp = (Temp&(~mask))|data;
+
+  rc = camsensor_i2c_write_byte(offset, Temp);
+  return rc;
+}
+
+static int32_t ov5642_set_sharpness(int8_t sharpness)
+{
+   int32_t rc = 0;
+
+   switch (sharpness)
+   {
+	   case OV5642_SHARPNESS_POSITIVE_1:
+		   //@@ Manual Sharpness  +1
+		   rc = ov5642_write_mask_reg(0x530A, 0x08, 0x08);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531e, 0x04, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531f, 0x04, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   break;
+   
+	   case OV5642_SHARPNESS_POSITIVE_2:
+		   //@@ Manual Sharpness  +2
+		   rc = ov5642_write_mask_reg(0x530A, 0x08, 0x08);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531e, 0x08, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531f, 0x08, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   break;
+
+	   case OV5642_SHARPNESS_POSITIVE_3:
+		   //@@ Manual Sharpness  +3
+		   rc = ov5642_write_mask_reg(0x530A, 0x08, 0x08);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531e, 0x0c, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531f, 0x0c, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   break;
+
+	   case OV5642_SHARPNESS_POSITIVE_4:
+		   //@@ Manual Sharpness  +4
+		   rc = ov5642_write_mask_reg(0x530A, 0x08, 0x08);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531e, 0x0f, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531f, 0x0f, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   break;
+
+	   case OV5642_SHARPNESS_POSITIVE_5:
+		   //@@ Manual Sharpness  +5
+		   rc = ov5642_write_mask_reg(0x530A, 0x08, 0x08);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531e, 0x1f, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531f, 0x1f, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   break;
+
+	   case OV5642_SHARPNESS_OFF:
+	   default:
+		   //@@ Manual Sharpness  OFF
+		   rc = ov5642_write_mask_reg(0x530A, 0x08, 0x08);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531e, 0x00, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   rc = ov5642_write_mask_reg(0x531f, 0x00, 0xff);
+		   if (rc < 0)
+			   goto ov5642_set_sharpness_fail;
+		   break;
+   }
+  return rc;
+  
+  ov5642_set_sharpness_fail :
+	printk("#### ov5642_set_sharpness_fail(%d) ####\n", sharpness);
+
+  return rc;
+}
+
+static int32_t camsensor_ov5642_sw_reset_reg_setup(void)
+{
+   int32_t  rc = 0;
+
+   int32_t		ary_size=0;
+   int			i;
+   
+   ary_size = sizeof(cam_sw_ov5642_resets_setup)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+   for(i=0;i<ary_size;i++)
+   {
+	rc = camsensor_i2c_write_byte(cam_sw_ov5642_resets_setup[i].addr, cam_sw_ov5642_resets_setup[i].val);
+	if(rc < 0)
+	{
+         return rc;
+ 	}
+   }
+
+   return rc;
+}
+
+static int32_t camsensor_ov5642_initial_reg_setup(void)
+{
+
+   int32_t rc = 0;
+   uint32_t		ary_size=0;
+   int			i;
+   
+   ary_size = sizeof(cam_VGA_initial_setup)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+   for(i=0;i<ary_size;i++)
+   {
+	rc = camsensor_i2c_write_byte(cam_VGA_initial_setup[i].addr, cam_VGA_initial_setup[i].val);
+	if(rc < 0)
+	{
+		printk(KERN_ERR "[camera] cam_VGA_initial_setup fail\n");
+		return rc;
+ 	}
+   }
+
+   ary_size = sizeof(cam_CCI_IQ)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+   for(i=0;i<ary_size;i++)
+   {
+	rc = camsensor_i2c_write_byte(cam_CCI_IQ[i].addr, cam_CCI_IQ[i].val);
+	if(rc < 0)
+	{
+		printk(KERN_ERR "[camera] cam_CCI_IQ fail\n");
+		return rc;
+ 	}
+   }
+
+   ary_size = sizeof(cam_night_mode_setup)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+   for(i=0;i<ary_size;i++)
+   {
+	rc = camsensor_i2c_write_byte(cam_night_mode_setup[i].addr, cam_night_mode_setup[i].val);
+	if(rc < 0)
+	{
+		printk(KERN_ERR "[camera] cam_night_mode_setup fail\n");
+		return rc;
+ 	}
+   }
+
+   // Fix AEC/AGC
+   rc = camsensor_i2c_write_byte(0x3503, 0x07);
+   if(rc < 0)
+   {
+	printk(KERN_ERR "[camera] Fix AEC/AGC fail\n");
+	return rc;
+   }
+
+#ifdef USE_5M_PREVIEW
+   ary_size = sizeof(cam_capture_5M_reg_setup)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+   for(i=0;i<ary_size;i++)
+   {
+	rc = camsensor_i2c_write_byte(cam_capture_5M_reg_setup[i].addr, cam_capture_5M_reg_setup[i].val);
+	if(rc < 0)
+	{
+		printk(KERN_ERR "[camera] init cam_capture_5M_reg_setup fail\n");
+		return rc;
+ 	}
+   }
+#else  
+   if (Preview_Resolution_Value == OV5642_XGA_PREVIEW)
+   {
+	   printk(KERN_ERR "[camera] camsensor_ov5642_preview_XGA_reg_setup\n");
+	   ary_size = sizeof(cam_preview_xga_reg_setup)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+	   for(i=0;i<ary_size;i++)
+	   {
+		rc = camsensor_i2c_write_byte(cam_preview_xga_reg_setup[i].addr, cam_preview_xga_reg_setup[i].val);
+		if(rc < 0)
+		{
+			printk(KERN_ERR "[camera] init cam_preview_xga_reg_setup fail\n");
+			return rc;
+	 	}
+	   }
+   }
+   else
+   {
+	   printk(KERN_ERR "[camera] camsensor_ov5642_preview_VGA_reg_setup\n");
+	   ary_size = sizeof(cam_preview_VGA_reg_setup)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+	   for(i=0;i<ary_size;i++)
+	   {
+		rc = camsensor_i2c_write_byte(cam_preview_VGA_reg_setup[i].addr, cam_preview_VGA_reg_setup[i].val);
+		if(rc < 0)
+		{
+			printk(KERN_ERR "[camera] init cam_preview_VGA_reg_setup fail\n");
+			return rc;
+	 	}
+	   }
+   }
+#endif
+
+   rc = ov5642_set_sharpness(1);
+
+   // Start AEC/AGC
+   rc = camsensor_i2c_write_byte(0x3503, 0x00);
+   if(rc < 0)
+   {
+	printk(KERN_ERR "[camera] Start AEC/AGC fail\n");
+	return rc;
+   }
+
+   return rc;
+}
+
+
+static int ov5642_probe_init_done(const struct msm_camera_sensor_info *data)
+{
+	gpio_direction_output(data->sensor_pwd, 0);
+	gpio_free(data->sensor_pwd);
+
+	gpio_direction_output(data->sensor_reset, 0);
+	gpio_free(data->sensor_reset);
+	return 0;
+}
+
+static int ov5642_probe_init_sensor(const struct msm_camera_sensor_info *data)
+{
+	int32_t  rc;
+	uint8_t chipid_h = 0, chipid_l = 0;
+
+#if 0
+	/*7. send soft reset*/
+	rc = camsensor_ov5642_sw_reset_reg_setup();
+	if(rc < 0)
+	{
+		goto init_probe_fail;
+	}
+	/*8. delay 5ms*/
+	mdelay(100);
+
+	
+#endif
+	CDBG("ov5642_sensor_init(): reseting sensor.\n");
+
+	rc = camsensor_i2c_read_byte(PIDH, &chipid_h);
+	printk("[camera] camsensor_ov5642_i2c_read=%d\n", rc);
+	if (rc < 0)
+		goto init_probe_fail;
+
+	printk("[camera] chipid0x%X=0x%X\n", chipid_h, 0x56);
+	if (chipid_h != 0x56) {
+		CDBG("OV5642 wrong model_id = 0x%x\n", chipid_h);
+		rc = -ENODEV;
+		goto init_probe_fail;
+	}
+	rc = camsensor_i2c_read_byte(PIDL, &chipid_l);
+	printk("[camera] camsensor_ov5642_i2c_read=%d\n", rc);
+	if (rc < 0)
+		goto init_probe_fail;
+
+	printk("[camera] chipid0x%X=0x%X\n", chipid_l, 0x42);
+	if (chipid_l != 0x42) {
+		CDBG("OV5642 wrong model_id = 0x%x\n", chipid_l);
+		rc = -ENODEV;
+		goto init_probe_fail;
+	}
+	
+        printk("[YC] ov5642_probe_init_sensor\n");
+	goto init_probe_done;
+
+init_probe_fail:
+	ov5642_probe_init_done(data);
+init_probe_done:
+	return rc;
+}
+
+static int ov5642_init_client(struct i2c_client *client)
+{
+	/* Initialize the MSM_CAMI2C Chip */
+	init_waitqueue_head(&ov5642_wait_queue);
+	return 0;
+}
+
+static const struct i2c_device_id ov5642_i2c_id[] = {
+	{ "ov5642", 0},
+	{ }
+};
+
+static int ov5642_i2c_probe(struct i2c_client *client,
+	const struct i2c_device_id *id)
+{
+	int rc = 0;
+	CDBG("ov5642_probe called!\n");
+
+	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
+		CDBG("i2c_check_functionality failed\n");
+		goto probe_failure;
+	}
+
+	ov5642_sensorw = kzalloc(sizeof(struct ov5642_work), GFP_KERNEL);
+	if (!ov5642_sensorw) {
+		CDBG("kzalloc failed.\n");
+		rc = -ENOMEM;
+		goto probe_failure;
+	}
+
+	i2c_set_clientdata(client, ov5642_sensorw);
+	ov5642_init_client(client);
+	ov5642_client = client;
+
+	mdelay(50);
+
+	CDBG("ov5642_probe successed! rc = %d\n", rc);
+	return 0;
+
+probe_failure:
+	CDBG("ov5642_probe failed! rc = %d\n", rc);
+	return rc;
+}
+
+static struct i2c_driver ov5642_i2c_driver = {
+	.id_table = ov5642_i2c_id,
+	.probe  = ov5642_i2c_probe,
+	.remove = __exit_p(ov5642_i2c_remove),
+	.driver = {
+		.name = "ov5642",
+	},
+};
+
+/*
+static int32_t ov5642_test(enum msm_s_test_mode mo)
+{
+	int32_t rc = 0;
+
+	if (mo == S_TEST_OFF)
+		rc = 0;
+	else
+		rc = ov5642_i2c_write_b(ov5642_client->addr,
+			REG_TEST_PATTERN_MODE, (uint16_t)mo);
+
+	return rc;
+}
+*/
+
+static int32_t ov5642_write_AWB_reg(void)
+{
+   int32_t rc = 0;
+   #if 0
+   uint32_t		ary_size=0;
+   int			i;
+   
+   ary_size=sizeof(cam_awb_auto)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+   for(i=0;i<ary_size;i++)
+   {
+      rc=camsensor_ov5642_i2c_write((uint16_t)(cam_awb_auto[i].addr >> 16),
+	  	(uint16_t)(cam_awb_auto[i].addr & 0xFFFF),
+		cam_awb_auto[i].val);
+      if(rc < 0)
+      {
+         return rc;
+      }
+   }
+   #endif
+   return rc;
+}
+
+static int32_t ov5642_write_WB_cloudy_reg(void)
+{
+   int32_t rc = 0;
+   #if 0
+   uint32_t ary_size=0;
+   int			i;
+   
+   ary_size=sizeof(cam_wb_cloudy)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+   for(i=0;i<ary_size;i++)
+   {
+      rc = camsensor_ov5642_i2c_write((uint16_t)((cam_wb_cloudy[i].addr & 0xFFFF0000)>>16),
+	  	(uint16_t)(cam_wb_cloudy[i].addr & 0xFFFF),
+		cam_wb_cloudy[i].val);
+      if (rc < 0)
+      {
+         return rc;
+      }
+   }
+   #endif
+   return rc;
+}
+
+static int32_t ov5642_write_WB_horizon_reg(void)
+{
+   int32_t rc = 0;
+   #if 0
+   uint32_t ary_size=0;
+   int			i;
+   
+   ary_size=sizeof(cam_wb_horizon)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+   for(i=0;i<ary_size;i++)
+   {
+      rc = camsensor_ov5642_i2c_write((uint16_t)(cam_wb_horizon[i].addr >>16),
+	  	(uint16_t)(cam_wb_horizon[i].addr & 0xFFFF),
+		cam_wb_horizon[i].val);
+      if (rc < 0)
+      {
+         return rc;
+      }
+   }
+   #endif
+   return rc;
+}
+
+
+static int32_t ov5642_write_WB_fluorescent_reg(void)
+{
+   int32_t rc = 0;
+   #if 0
+   uint32_t ary_size=0;
+   int			i;
+   
+   ary_size=sizeof(cam_wb_fluorescent)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+   for(i=0;i<ary_size;i++)
+   {
+      rc = camsensor_ov5642_i2c_write((uint16_t)(cam_wb_fluorescent[i].addr >>16),
+	  	(uint16_t)(cam_wb_fluorescent[i].addr & 0xFFFF),
+		cam_wb_fluorescent[i].val);
+      if (rc < 0)
+      {
+         return rc;
+      }
+   }
+   #endif
+   return rc;
+}
+
+static int32_t ov5642_write_WB_tungsten_reg(void)
+{
+   int32_t rc = 0;
+   #if 0
+   uint32_t ary_size=0;
+   int			i;
+   
+   ary_size=sizeof(cam_wb_tungsten)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+   for(i=0;i<ary_size;i++)
+   {
+      rc = camsensor_ov5642_i2c_write((uint16_t)(cam_wb_tungsten[i].addr >>16),
+	  	(uint16_t)(cam_wb_tungsten[i].addr & 0xFFFF),
+		cam_wb_tungsten[i].val);
+      if (rc < 0)
+      {
+         return rc;
+      }
+   }
+   #endif
+   return rc;
+}
+
+static int32_t ov5642_write_WB_daylight_reg(void)
+{
+   int32_t rc = 0;
+   #if 0
+   uint32_t ary_size=0;
+   int			i;
+   
+   ary_size=sizeof(cam_wb_daylight)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+   for(i=0;i<ary_size;i++)
+   {
+      rc = camsensor_ov5642_i2c_write((uint16_t)(cam_wb_daylight[i].addr >>16),
+	  	(uint16_t)(cam_wb_daylight[i].addr & 0xFFFF),
+		cam_wb_daylight[i].val);
+      if (rc < 0)
+      {
+         return rc;
+      }
+   }
+   #endif
+   return rc;
+}
+
+static int32_t ov5642_write_bestshot_mode_beach_reg(void)
+{
+   int32_t rc = 0;
+   #if 0
+   uint32_t ary_size=0;
+   int			i;
+   
+   ary_size=sizeof(cam_extra_mode_beach)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+   for(i=0;i<ary_size;i++)
+   {
+      rc = camsensor_ov5642_i2c_write((uint16_t)((cam_extra_mode_beach[i].addr & 0xFFFF0000)>>16),
+	  	(uint16_t)(cam_extra_mode_beach[i].addr & 0xFFFF),
+		cam_extra_mode_beach[i].val);
+      if (rc < 0)
+      {
+         return rc;
+      }
+   }
+   #endif
+   return rc;
+}
+
+static int32_t ov5642_write_bestshot_mode_night_reg(void)
+{
+   int32_t rc = 0;
+   #if 0
+   uint32_t ary_size=0;
+   int			i;
+   
+   ary_size=sizeof(cam_extra_mode_night)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+   for(i=0;i<ary_size;i++)
+   {
+      rc = camsensor_ov5642_i2c_write((uint16_t)((cam_extra_mode_night[i].addr & 0xFFFF0000)>>16),
+	  	(uint16_t)(cam_extra_mode_night[i].addr & 0xFFFF),
+		cam_extra_mode_night[i].val);
+      if (rc < 0)
+      {
+         return rc;
+      }
+   }
+   #endif
+   return rc;
+}
+
+static int32_t ov5642_write_bestshot_mode_night_break_reg(void)
+{
+   int32_t rc = 0;
+   #if 0
+   uint32_t ary_size=0;
+   int			i;
+   
+   ary_size=sizeof(cam_extra_mode_night_break)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+   for(i=0;i<ary_size;i++)
+   {
+      rc = camsensor_ov5642_i2c_write((uint16_t)((cam_extra_mode_night_break[i].addr & 0xFFFF0000)>>16),
+	  	(uint16_t)(cam_extra_mode_night_break[i].addr & 0xFFFF),
+		cam_extra_mode_night_break[i].val);
+      if (rc < 0)
+      {
+         return rc;
+      }
+   }
+   #endif
+   return rc;
+}
+
+static int32_t camsensor_ov5642_capture_reg_setup(void)
+{
+   int32_t		rc = 0;
+   uint32_t	ary_size=0;
+   int			i;
+   uint8_t reg_val = 0;
+   uint32_t reg_val_32 = 0, reg_val_32_1 = 0;
+
+   // Fix AEC/AGC
+   rc = camsensor_i2c_write_byte(0x3503, 0x07);
+   if(rc < 0)
+   {
+	printk(KERN_ERR "[camera] Fix AEC/AGC fail\n");
+	return rc;
+   }
+
+   if (Preview_Resolution_Value == OV5642_XGA_PREVIEW)
+   {
+	   preview_brightness = 115;
+   }
+   else
+   {
+	   preview_brightness = 130;
+   }
+
+   rc = camsensor_i2c_read_byte(0x3500, &reg_val);
+   if(rc < 0)
+   {
+	  return rc;
+   }
+   reg_val_32 = ((reg_val & 0x7) << 16);
+   rc = camsensor_i2c_read_byte(0x3501, &reg_val);
+   if(rc < 0)
+   {
+	  return rc;
+   }
+   reg_val_32 |= (reg_val << 8);
+   rc = camsensor_i2c_read_byte(0x3502, &reg_val);
+   if(rc < 0)
+   {
+	  return rc;
+   }
+   reg_val_32 |= reg_val;
+
+   reg_val_32 = (reg_val_32*preview_brightness)/capture_brightness;
+   rc = camsensor_i2c_write_byte(0x3500, (reg_val_32>>16)&0xFF);
+   if(rc < 0)
+   {
+	  return rc;
+   }
+   rc = camsensor_i2c_write_byte(0x3501, (reg_val_32>>8)&0xFF);
+   if(rc < 0)
+   {
+	  return rc;
+   }
+   rc = camsensor_i2c_write_byte(0x3502, (reg_val_32>>0)&0xFF);
+   if(rc < 0)
+   {
+	  return rc;
+   }
+
+   reg_val_32 = reg_val_32 >> 4;
+
+   rc = camsensor_i2c_read_byte(0x350c, &Stored_PreviewMaxlineHigh);
+   printk("[camera] camsensor_ov5642_i2c_read capture 0x350c=%x\n", Stored_PreviewMaxlineHigh);
+   if(rc < 0)
+   {
+	  return rc;
+   }
+   reg_val_32_1 |= (Stored_PreviewMaxlineHigh << 8);
+   rc = camsensor_i2c_read_byte(0x350d, &Stored_PreviewMaxlineLow);
+   printk("[camera] camsensor_ov5642_i2c_read capture 0x350d=%x\n", Stored_PreviewMaxlineLow);
+   if(rc < 0)
+   {
+	  return rc;
+   }
+   reg_val_32_1 |= Stored_PreviewMaxlineLow;
+
+   rc = camsensor_i2c_write_byte(0x3a00, 0x78);  // Disable night mode
+   if(rc < 0)
+   {
+	 return rc;
+   }
+
+   printk("[camera] reg_val_32=%x reg_val_32_1=%x\n", reg_val_32, reg_val_32_1);
+   if (reg_val_32 > 0x7D0)
+   {
+		Stored_Nightmode_Multiple = reg_val_32/0x7D0;
+		rc = camsensor_i2c_write_byte(0x350c, reg_val_32 >> 8);
+		if(rc < 0)
+		{
+	         return rc;
+	 	}
+		rc = camsensor_i2c_write_byte(0x350d, reg_val_32 & 0xFF);
+		if(rc < 0)
+		{
+	         return rc;
+	 	}
+   }
+   else
+   {
+		Stored_Nightmode_Multiple = 1;
+		rc = camsensor_i2c_write_byte(0x350c, 0x07);
+		if(rc < 0)
+		{
+	         return rc;
+	 	}
+		rc = camsensor_i2c_write_byte(0x350d, 0xD0);
+		if(rc < 0)
+		{
+	         return rc;
+	 	}
+   }
+
+   ary_size = sizeof(cam_capture_5M_reg_setup)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+   for(i=0;i<ary_size;i++)
+   {
+	rc = camsensor_i2c_write_byte(cam_capture_5M_reg_setup[i].addr, cam_capture_5M_reg_setup[i].val);
+	if(rc < 0)
+	{
+         return rc;
+ 	}
+   }
+
+   printk(KERN_ERR "[camera] camsensor_ov5642_capture_5M_reg_setup\n");
+
+   return rc;;
+}
+
+static int32_t camsensor_ov5642_preview_reg_setup(void)
+{
+
+   int32_t		rc = 0;
+   uint32_t	ary_size=0;
+   int			i;
+
+   printk(KERN_ERR "[camera] preview_reg_setup(%d) %X %X\n", Preview_Resolution_Value, Stored_PreviewMaxlineHigh, Stored_PreviewMaxlineLow);
+
+   rc = camsensor_i2c_write_byte(0x350c, Stored_PreviewMaxlineHigh);
+   if(rc < 0)
+   {
+	   printk(KERN_ERR "[camera] Stored_PreviewMaxlineHigh fail\n");
+	   return rc;
+   }
+   rc = camsensor_i2c_write_byte(0x350d, Stored_PreviewMaxlineLow);
+   if(rc < 0)
+   {
+	   printk(KERN_ERR "[camera] Stored_PreviewMaxlineLow fail\n");
+	   return rc;
+   }
+
+   // Fix AEC/AGC
+   rc = camsensor_i2c_write_byte(0x3503, 0x07);
+   if(rc < 0)
+   {
+	printk(KERN_ERR "[camera] Fix AEC/AGC fail\n");
+	return rc;
+   }
+
+#ifdef USE_5M_PREVIEW
+   ary_size = sizeof(cam_capture_5M_reg_setup)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+   for(i=0;i<ary_size;i++)
+   {
+	rc = camsensor_i2c_write_byte(cam_capture_5M_reg_setup[i].addr, cam_capture_5M_reg_setup[i].val);
+	if(rc < 0)
+	{
+		printk(KERN_ERR "[camera] cam_capture_5M_reg_setup fail\n");
+		return rc;
+ 	}
+   }
+#else
+   if (Preview_Resolution_Value == OV5642_XGA_PREVIEW)
+   {
+	   printk(KERN_ERR "[camera] camsensor_ov5642_preview_XGA_reg_setup\n");
+	   ary_size = sizeof(cam_preview_xga_reg_setup)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+	   for(i=0;i<ary_size;i++)
+	   {
+		rc = camsensor_i2c_write_byte(cam_preview_xga_reg_setup[i].addr, cam_preview_xga_reg_setup[i].val);
+		if(rc < 0)
+		{
+			printk(KERN_ERR "[camera] cam_preview_xga_reg_setup fail\n");
+			return rc;
+	 	}
+	   }
+   }
+   else
+   {
+	   printk(KERN_ERR "[camera] camsensor_ov5642_preview_VGA_reg_setup\n");
+	   ary_size = sizeof(cam_preview_VGA_reg_setup)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+	   for(i=0;i<ary_size;i++)
+	   {
+		rc = camsensor_i2c_write_byte(cam_preview_VGA_reg_setup[i].addr, cam_preview_VGA_reg_setup[i].val);
+		if(rc < 0)
+		{
+			printk(KERN_ERR "[camera] cam_preview_VGA_reg_setup fail\n");
+			return rc;
+	 	}
+	   }
+   }
+#endif
+
+   // Start AEC/AGC
+   rc = camsensor_i2c_write_byte(0x3503, 0x00);
+   if(rc < 0)
+   {
+	   printk(KERN_ERR "[camera] Start AEC/AGC fail\n");
+	   return rc;
+   }
+
+   rc = camsensor_i2c_write_byte(0x3a00, 0x7c);
+   if(rc < 0)
+   {
+	   printk(KERN_ERR "[camera] 0x3a00 fail\n");
+	   return rc;
+   }
+
+
+   return rc;;
+}
+
+static int32_t ov5642_setting(enum msm_s_reg_update rupdate,
+	enum msm_s_setting rt)
+{
+	int32_t rc = 0;
+
+	printk("#### %s(%d %d) ####\n", __FUNCTION__, rupdate, rt);
+
+	switch (rupdate) {
+	case S_UPDATE_PERIODIC:
+	  /*lint -restore */
+	      switch (rt)
+	      {
+	        case S_RES_CAPTURE:
+	           rc = camsensor_ov5642_capture_reg_setup();
+	           if(rc < 0)
+	           {
+				   printk(KERN_ERR "[camera] camsensor_ov5642_capture_reg_setup fail\n");
+				   return rc;
+	           } 	
+	           mdelay(300*Stored_Nightmode_Multiple);
+	           break;
+			   
+	        case S_RES_PREVIEW:
+	           rc = camsensor_ov5642_preview_reg_setup();
+	           if(rc < 0)
+	           {
+				   printk(KERN_ERR "[camera] camsensor_ov5642_preview_reg_setup fail\n");
+				   return rc;
+	           } 	
+	           mdelay(300);
+	           break;
+			
+	        default:
+	          return rc;
+	      } /* rt */
+		break; /* UPDATE_PERIODIC */
+
+	case S_REG_INIT:
+		rc = camsensor_ov5642_initial_reg_setup();
+		if(rc < 0)
+		{
+			printk(KERN_ERR "[camera] camsensor_ov5642_initial_reg_setup fail\n");
+		    return rc;
+		}
+		mdelay(100);
+		break; /* case REG_INIT: */
+
+	default:
+		rc = -EINVAL;
+		break;
+	} /* switch (rupdate) */
+
+//	printk("[Camera] test pattern\n");
+//	rc = camsensor_i2c_write_word(0xB054, 0x0001);
+	return rc;
+}
+
+static int32_t ov5642_power_down(void)
+{
+	int32_t rc = 0;
+
+	rc = camsensor_i2c_write_byte(0x300E, 0x18);
+	if(rc < 0)
+	{
+	 return rc;
+	}
+	rc = camsensor_i2c_write_byte(0x3008, 0x42);
+	if(rc < 0)
+	{
+	 return rc;
+	}
+
+	return rc;
+}
+
+static int ov5642_sensor_release(void)
+{
+	int rc = -EBADF;
+
+	mutex_lock(&ov5642_mutex);
+
+	ov5642_power_down();
+
+	gpio_direction_output(ov5642_ctrl->sensordata->sensor_reset,
+		0);
+	gpio_free(ov5642_ctrl->sensordata->sensor_reset);
+
+	gpio_direction_output(ov5642_ctrl->sensordata->sensor_pwd,
+		0);
+	gpio_free(ov5642_ctrl->sensordata->sensor_pwd);
+	mdelay(1);
+
+	/*disable clk*/
+	msm_camio_clk_disable(CAMIO_VFE_CLK);
+       printk("[ouyang] ov5642_power_disable in ov5642_sensor_release\n");
+	ov5642_power_disable();
+
+	kfree(ov5642_ctrl);
+	ov5642_ctrl = NULL;
+
+	CDBG("ov5642_release completed\n");
+
+	mutex_unlock(&ov5642_mutex);
+	return rc;
+}
+
+static int ov5642_sensor_init(const struct msm_camera_sensor_info *data)
+{
+	int32_t  rc;
+
+	/* pull down power-down */
+	rc = gpio_request(data->sensor_pwd, "ov5642");
+	printk("[camera] gpio_request pwd high=%d\n", rc);
+	if (!rc || rc == -EBUSY)
+		gpio_direction_output(data->sensor_pwd, 1);
+	else printk(KERN_ERR "ov5642 error: request gpio %d failed: "
+			"%d\n", data->sensor_pwd, rc);
+	
+	ov5642_power_enable();
+	
+	rc = gpio_request(data->sensor_pwd, "ov5642");
+	printk("[camera] gpio_request pwd high=%d\n", rc);
+	if (!rc || rc == -EBUSY)
+		gpio_direction_output(data->sensor_pwd, 0);
+	else printk(KERN_ERR "ov5642 error: request gpio %d failed: "
+			"%d\n", data->sensor_pwd, rc);
+	mdelay(10);
+	
+	rc = gpio_request(data->sensor_reset, "ov5642");
+	printk("[camera] gpio_request reset=%d\n", rc);
+	if (!rc || rc == -EBUSY)
+		gpio_direction_output(data->sensor_reset, 1);
+	else
+		printk(KERN_ERR "ov5642 error: request gpio %d failed: "
+			"%d\n", data->sensor_reset, rc);
+	
+	/* enable clk */
+	msm_camio_clk_enable(CAMIO_VFE_CLK);
+	
+	/* enable mclk first */
+	msm_camio_clk_rate_set(OV5642_DEFAULT_CLOCK_RATE);
+	mdelay(100);
+	
+	/* pull up power-down */
+	
+	
+	msm_camio_camif_pad_reg_reset();
+	mdelay(20);
+	
+	rc = ov5642_probe_init_sensor(data);
+	if (rc < 0)
+		return rc;
+	
+	if (ov5642_ctrl->prev_res == S_QTR_SIZE)
+	{
+		rc = ov5642_setting(S_REG_INIT, S_RES_PREVIEW);
+	}
+	else
+	{
+		rc = ov5642_setting(S_REG_INIT, S_RES_CAPTURE);
+	}
+	return rc;
+}
+
+static int ov5642_sensor_open_init(const struct msm_camera_sensor_info *data)
+{
+	int32_t  rc;
+	init_retry = 0;
+
+init_start:
+	printk("#### %s retry%d ####\n", __FUNCTION__, init_retry);
+
+	ov5642_ctrl = kzalloc(sizeof(struct ov5642_ctrl), GFP_KERNEL);
+	if (!ov5642_ctrl) {
+		CDBG("ov5642_init failed!\n");
+		rc = -ENOMEM;
+		goto init_done;
+	}
+	printk(KERN_ERR "[camera] ov5642_sensor_open_init\n");
+	ov5642_ctrl->fps_divider = 1 * 0x00000400;
+	ov5642_ctrl->pict_fps_divider = 1 * 0x00000400;
+	ov5642_ctrl->set_test = S_TEST_OFF;
+	ov5642_ctrl->prev_res = S_QTR_SIZE;
+	ov5642_ctrl->pict_res = S_FULL_SIZE;
+
+	if (data)
+		ov5642_ctrl->sensordata = data;
+
+	rc = ov5642_sensor_init(ov5642_ctrl->sensordata);
+
+	if (rc < 0) {
+		printk("ov5642_setting failed. rc = %d retry%d\n", rc, init_retry);
+		if (init_retry < OV5642_INIT_RETRY_COUNT)
+		{
+			init_retry++;
+			ov5642_sensor_release();
+			mdelay(1);
+			goto init_start;
+		}
+		else
+			goto init_fail1;
+	}
+
+	goto init_done;
+
+init_fail1:
+	ov5642_probe_init_done(data);
+	kfree(ov5642_ctrl);
+init_done:
+	init_retry = 0;
+	return rc;
+}
+
+static void ov5642_get_pict_fps(uint16_t fps, uint16_t *pfps)
+{
+	/* input fps is preview fps in Q8 format */
+	uint32_t divider;   /* Q10 */
+
+	divider = (uint32_t)
+		((ov5642_reg_pat[S_RES_PREVIEW].size_h +
+			ov5642_reg_pat[S_RES_PREVIEW].blk_l) *
+		 (ov5642_reg_pat[S_RES_PREVIEW].size_w +
+			ov5642_reg_pat[S_RES_PREVIEW].blk_p)) * 0x00000400 /
+		((ov5642_reg_pat[S_RES_CAPTURE].size_h +
+			ov5642_reg_pat[S_RES_CAPTURE].blk_l) *
+		 (ov5642_reg_pat[S_RES_CAPTURE].size_w +
+			ov5642_reg_pat[S_RES_CAPTURE].blk_p));
+
+	/* Verify PCLK settings and frame sizes. */
+	*pfps = (uint16_t)(fps * divider / 0x00000400);
+}
+
+static uint16_t ov5642_get_prev_lines_pf(void)
+{
+	return ov5642_reg_pat[S_RES_PREVIEW].size_h +
+		ov5642_reg_pat[S_RES_PREVIEW].blk_l;
+}
+
+static uint16_t ov5642_get_prev_pixels_pl(void)
+{
+	return ov5642_reg_pat[S_RES_PREVIEW].size_w +
+		ov5642_reg_pat[S_RES_PREVIEW].blk_p;
+}
+
+static uint16_t ov5642_get_pict_lines_pf(void)
+{
+	return ov5642_reg_pat[S_RES_CAPTURE].size_h +
+		ov5642_reg_pat[S_RES_CAPTURE].blk_l;
+}
+
+static uint16_t ov5642_get_pict_pixels_pl(void)
+{
+	return ov5642_reg_pat[S_RES_CAPTURE].size_w +
+		ov5642_reg_pat[S_RES_CAPTURE].blk_p;
+}
+
+static uint32_t ov5642_get_pict_max_exp_lc(void)
+{
+	uint32_t snapshot_lines_per_frame;
+
+	if (ov5642_ctrl->pict_res == S_QTR_SIZE)
+		snapshot_lines_per_frame =
+		ov5642_reg_pat[S_RES_PREVIEW].size_h +
+		ov5642_reg_pat[S_RES_PREVIEW].blk_l;
+	else
+		snapshot_lines_per_frame = 3961 * 3;
+
+	return snapshot_lines_per_frame;
+}
+
+static uint32_t ov5642_style_tuning(void)
+{
+	int32_t rc = 0;
+#if 0
+	rc = camsensor_ov5642_i2c_write((uint16_t)((REG_TC_UserContrast & 0xFFFF0000)>>16), (uint16_t)(REG_TC_UserContrast & 0xFFFF), Contrast_Value);
+ 	if (rc < 0)
+	{
+		return rc;
+	}	
+ 	rc = camsensor_ov5642_i2c_write((uint16_t)((REG_TC_UserSaturation & 0xFFFF0000)>>16), (uint16_t)(REG_TC_UserSaturation & 0xFFFF), Saturation_Value);
+	if (rc < 0)
+	{
+		return rc;
+	}	
+	rc = camsensor_ov5642_i2c_write((uint16_t)((REG_TC_UserBrightness & 0xFFFF0000)>>16), (uint16_t)(REG_TC_UserBrightness & 0xFFFF), Sharpness_Value);
+	if (rc < 0)
+	{
+		return rc;
+	}	
+#endif
+	return rc;  
+}
+
+static int32_t ov5642_set_brightness (int8_t brightness)
+{
+	int32_t rc = 0;
+
+#ifdef ENABLE_ADJUSTMENT
+	uint16_t  brightness_value = 0;
+	uint32_t  brightness_offset = 3;
+	printk("#### %s(%d) ####\n", __FUNCTION__, brightness);
+
+    Brightness_level = brightness;
+    brightness_value = brightness + brightness_offset + ISO_level;
+	if (brightness_value >= OV5642_BRIGHTNESS_DEGREE)
+		brightness_value = OV5642_BRIGHTNESS_DEGREE;
+
+	switch (brightness_value)
+	{
+		case 0:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x0A);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x02);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x20);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x0A);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x02);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 1:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x08);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x20);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x08);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 2:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x16);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x0E);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x30);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x16);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x0E);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 3:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x1C);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x14);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x30);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x1C);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x14);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 4:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x22);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x1A);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x41);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x22);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x1A);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 5:  
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x28);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x20);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x51);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x28);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x20);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 6:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x2E);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x26);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x61);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x2E);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x26);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 7:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x32);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x2A);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x61);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x32);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x2A);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 8:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x3A);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x32);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x61);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x3A);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x32);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 9:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x40);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x38);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x71);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x40);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x38);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 10:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x46);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x3E);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x80);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x46);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x3E);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x10);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 11:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x4C);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x44);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x80);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x4C);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x44);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x20);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 12:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x52);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x4A);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x90);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x52);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x4A);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x20);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 13:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x58);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x50);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0x91);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x58);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x50);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x20);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 14:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x5E);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x56);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0xA0);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x5E);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x56);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x20);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		case 15:
+			rc = camsensor_i2c_write_byte(0x3a0f, 0x64);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a10, 0x5C);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a11, 0xA0);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1b, 0x64);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1e, 0x5C);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			rc = camsensor_i2c_write_byte(0x3a1f, 0x20);
+			if (rc < 0)
+				goto ov5642_set_brightness_fail;
+			break;
+
+		default:
+		break;
+	}
+	return rc;
+
+ov5642_set_brightness_fail :
+	printk("#### ov5642_set_brightness_fail(%d)=%d ####\n", brightness, rc);
+#endif //ENABLE_ADJUSTMENT 
+
+	return rc;
+}
+
+static int32_t ov5642_set_contrast (int8_t contrast)
+{
+	int32_t rc = 0;
+#if 0
+	rc = camsensor_ov5642_i2c_write((uint16_t)((REG_TC_UserContrast & 0xFFFF0000)>>16), (uint16_t)(REG_TC_UserContrast & 0xFFFF), Contrast_Value);
+ 	if (rc < 0)
+	{
+		return rc;
+	}	
+#endif
+	return rc;  
+}
+
+static int32_t ov5642_set_effect (int8_t effect)
+{
+	 int32_t rc = 0;
+
+#ifdef ENABLE_ADJUSTMENT
+	 switch(effect)
+	 {
+	    case CAMERA_EFFECT_NEGATIVE:
+			rc = ov5642_write_mask_reg(0x5001, 0x80, 0x80);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+			rc = ov5642_write_mask_reg(0x5580, 0x40, 0x40);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+	       break;
+		   
+	    case CAMERA_EFFECT_SOLARIZE:
+	       break;
+		   
+	    case CAMERA_EFFECT_SEPIA:
+			rc = ov5642_write_mask_reg(0x5001, 0x80, 0x80);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+			rc = ov5642_write_mask_reg(0x5580, 0x18, 0x58);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+			rc = camsensor_i2c_write_byte(0x5585, 0x40);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+			rc = camsensor_i2c_write_byte(0x5586, 0xa0);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+	       break;
+
+	    case CAMERA_EFFECT_MONO:
+			rc = ov5642_write_mask_reg(0x5001, 0x80, 0x80);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+			rc = ov5642_write_mask_reg(0x5580, 0x18, 0x58);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+			rc = camsensor_i2c_write_byte(0x5585, 0x80);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+			rc = camsensor_i2c_write_byte(0x5586, 0x80);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+	       break;
+
+	    case CAMERA_EFFECT_AQUA:
+			rc = ov5642_write_mask_reg(0x5001, 0x80, 0x80);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+			rc = ov5642_write_mask_reg(0x5580, 0x18, 0x58);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+			rc = camsensor_i2c_write_byte(0x5585, 0xa0);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+			rc = camsensor_i2c_write_byte(0x5586, 0x40);
+			if (rc < 0)
+				goto ov5642_set_effect_fail;
+	       break;
+
+		 case CAMERA_EFFECT_OFF:
+	     default:
+			 rc = ov5642_write_mask_reg(0x5001, 0x00, 0x80);
+			 if (rc < 0)
+				 return rc;
+			 rc = ov5642_write_mask_reg(0x5580, 0x00, 0x58);
+			 if (rc < 0)
+				 return rc;
+		 break;	
+	 }
+
+  return rc;
+
+  ov5642_set_effect_fail :
+	printk("#### ov5642_set_effect_fail ####\n");
+
+#endif //ENABLE_ADJUSTMENT
+
+  return rc;  
+}
+
+static int32_t ov5642_set_antibanding (int8_t antibanding)
+{
+   int32_t rc = 0; 
+#ifdef ENABLE_ADJUSTMENT
+	//Ouyang@CCI antibanding base setting
+	rc = camsensor_i2c_write_byte(0x3623, 0x01);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3630, 0x24);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3633, 0x00);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3c00, 0x00);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3c01, 0x34);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3c04, 0x28);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3c05, 0x98);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3c06, 0x00);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3c07, 0x07);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3c08, 0x01);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3c09, 0xc2);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x300d, 0x02);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3104, 0x01);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3c0a, 0x4e);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+	rc = camsensor_i2c_write_byte(0x3c0b, 0x1f);
+	if (rc < 0)
+		goto ov5642_set_antibanding_fail;
+
+	//Ouyang@CCI antibanding manual setting
+	 switch(antibanding)
+	 {
+	    case CAMERA_ANTIBANDING_60HZ:
+			rc = camsensor_i2c_write_byte(0x3c01, 0x80);
+			if (rc < 0)
+				goto ov5642_set_antibanding_fail;
+			rc = camsensor_i2c_write_byte(0x3c00, 0x00);
+			if (rc < 0)
+				goto ov5642_set_antibanding_fail;
+			break;
+
+	    case CAMERA_ANTIBANDING_50HZ:
+			rc = camsensor_i2c_write_byte(0x3c01, 0x80);
+			if (rc < 0)
+				goto ov5642_set_antibanding_fail;
+			rc = camsensor_i2c_write_byte(0x3c00, 0x04);
+			if (rc < 0)
+				goto ov5642_set_antibanding_fail;
+			break;
+
+	    case CAMERA_ANTIBANDING_OFF:
+			/*
+			   rc = ov5642_write_mask_reg(0x3013, 0x00, 0x20);
+			   if (rc < 0)
+				   goto ov5642_set_antibanding_fail;
+			   break;
+			*/
+	    case CAMERA_ANTIBANDING_AUTO:
+	     default:
+			rc = camsensor_i2c_write_byte(0x3c01, 0x00);
+			if (rc < 0)
+				goto ov5642_set_antibanding_fail;
+			rc = camsensor_i2c_write_byte(0x3c00, 0x00);
+			if (rc < 0)
+				goto ov5642_set_antibanding_fail;
+			break;	
+	 }
+  return rc;  
+  ov5642_set_antibanding_fail :
+	printk("#### ov5642_set_antibanding_fail(%d)=%d ####\n", antibanding, rc);
+	return rc;
+
+#endif //ENABLE_ADJUSTMENT
+
+  return rc;  
+}
+
+static int32_t ov5642_set_wb (int8_t wb)
+{
+	int32_t rc = 0;
+
+#ifdef ENABLE_ADJUSTMENT
+
+	switch(wb)
+	{
+		case CAMERA_WB_DAYLIGHT:
+			rc =camsensor_i2c_write_byte(0x3406, 0x01);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc =camsensor_i2c_write_byte(0x3400, 0x07);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3401, 0x02);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3402, 0x04);
+				if (rc < 0)
+			goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3403, 0x00);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3404, 0x05);
+			if (rc < 0)
+				goto ov5642_set_WB_fail;
+			rc = camsensor_i2c_write_byte(0x3405, 0x15);
+			if (rc < 0)
+				goto ov5642_set_WB_fail;
+			break; 	 
+
+		case CAMERA_WB_FLUORESCENT:
+			rc =camsensor_i2c_write_byte(0x3406, 0x01);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc =camsensor_i2c_write_byte(0x3400, 0x06);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3401, 0x2a);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3402, 0x04);
+				if (rc < 0)
+			goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3403, 0x00);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3404, 0x07);
+			if (rc < 0)
+				goto ov5642_set_WB_fail;
+			rc = camsensor_i2c_write_byte(0x3405, 0x24);
+			if (rc < 0)
+				goto ov5642_set_WB_fail;
+			break; 	 
+			
+		case CAMERA_WB_INCANDESCENT:
+			rc =camsensor_i2c_write_byte(0x3406, 0x01);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc =camsensor_i2c_write_byte(0x3400, 0x04);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3401, 0x58);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3402, 0x04);
+				if (rc < 0)
+			goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3403, 0x00);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3404, 0x08);
+			if (rc < 0)
+				goto ov5642_set_WB_fail;
+			rc = camsensor_i2c_write_byte(0x3405, 0x40);
+			if (rc < 0)
+				goto ov5642_set_WB_fail;
+			break; 
+			
+		case CAMERA_WB_CLOUDY_DAYLIGHT:
+			rc =camsensor_i2c_write_byte(0x3406, 0x01);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc =camsensor_i2c_write_byte(0x3400, 0x07);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3401, 0x88);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3402, 0x04);
+				if (rc < 0)
+			goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3403, 0x00);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			rc = camsensor_i2c_write_byte(0x3404, 0x05);
+			if (rc < 0)
+				goto ov5642_set_WB_fail;
+			rc = camsensor_i2c_write_byte(0x3405, 0x00);
+			if (rc < 0)
+				goto ov5642_set_WB_fail;
+			break; 	 
+/*
+		case CAMERA_WB_TUNGSTEN:
+			rc = ov5642_write_WB_tungsten_reg();
+			if (rc < 0)
+			{
+				return rc;
+			}  
+			break; 	 
+		 
+		case CAMERA_WB_HORIZON:
+			rc = ov5642_write_WB_horizon_reg();
+			if (rc < 0)
+			{
+				return rc;
+			}  		  	  	
+			break; 	 
+*/
+		case CAMERA_WB_AUTO:
+		default:
+			rc =camsensor_i2c_write_byte(0x3406, 0x00);
+			if (rc < 0)
+				goto ov5642_set_WB_fail ;
+			break; 	 
+	}
+
+	return rc;
+
+   ov5642_set_WB_fail :
+	printk("#### ov5642_set_WB_fail ####\n");
+
+#endif //ENABLE_ADJUSTMENT
+
+	return rc;  
+}
+
+
+static int32_t ov5642_set_iso (int8_t iso)
+{
+	int32_t rc = 0;
+
+#ifdef ENABLE_ADJUSTMENT
+	printk("#### %s(%d) ####\n", __FUNCTION__, iso);
+	switch(iso)//Ouyang@CCI use bringhtness key setting in temp
+	{
+		case CAMERA_ISO_200:
+			ISO_level = 2;		
+			break;
+
+		case CAMERA_ISO_400:
+			ISO_level = 4;
+			break;
+
+		case CAMERA_ISO_800:
+			ISO_level = 6;		
+			break;
+    
+        case CAMERA_ISO_100:
+		case CAMERA_ISO_AUTO:
+		default:
+		    ISO_level = 0;
+			break;
+	}
+
+	ov5642_set_brightness(Brightness_level);
+#endif //ENABLE_ADJUSTMENT
+
+	return rc;  
+
+}
+
+static int32_t ov5642_set_exposure_mode(int8_t exposure_mode)
+{
+	int32_t rc = 0;
+
+#ifdef ENABLE_ADJUSTMENT
+	uint32_t		ary_size=0;
+	int			i;
+
+	switch(exposure_mode)
+	{
+		case CAMERA_AEC_CENTER_WEIGHTED:
+			ary_size = sizeof(ov5642_exposure_mode_center_weighted)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+			for(i=0;i<ary_size;i++)
+			{
+				rc = camsensor_i2c_write_byte(ov5642_exposure_mode_center_weighted[i].addr, ov5642_exposure_mode_center_weighted[i].val);
+				if(rc < 0)
+				{
+					return rc;
+				}
+			}
+			break;
+
+		case CAMERA_AEC_SPOT_METERING:
+			ary_size = sizeof(ov5642_exposure_mode_spot_metering)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+			for(i=0;i<ary_size;i++)
+			{
+				rc = camsensor_i2c_write_byte(ov5642_exposure_mode_spot_metering[i].addr, ov5642_exposure_mode_spot_metering[i].val);
+				if(rc < 0)
+				{
+					return rc;
+				}
+			}
+			break;
+
+		case CAMERA_AEC_FRAME_AVERAGE:
+		default:
+			ary_size = sizeof(ov5642_exposure_mode_frame_avg)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+			for(i=0;i<ary_size;i++)
+			{
+				rc = camsensor_i2c_write_byte(ov5642_exposure_mode_frame_avg[i].addr, ov5642_exposure_mode_frame_avg[i].val);
+				if(rc < 0)
+				{
+					return rc;
+				}
+			}
+			break;
+	}
+
+#endif //ENABLE_ADJUSTMENT
+
+	return rc;  
+}
+
+static int32_t ov5642_get_ae_status(int8_t *sdata)
+{
+	int rc = 0;
+	uint8_t ae_status = 0;
+	uint8_t reg_val = 0;
+
+	rc = camsensor_i2c_read_byte(0x350b, &reg_val);
+	if (rc < 0)
+		printk("#### Read 0x350b fail%d ####\n", rc);
+	//printk("[camera] ov5642_get_ae_status 0x350b=%x\n", reg_val);
+
+	rc = camsensor_i2c_read_byte(0x3501, &ae_status);
+	if(rc < 0)
+	{
+	   return rc;
+	}
+
+	if ((reg_val >= 0x70) || (reg_val == 0))
+		ae_status++;
+
+	//printk("#### ov5642_get_ae_status=%X ####\n", ae_status);
+	if (rc < 0)
+		printk("#### ov5642_get_ae_status fail%d ####\n", rc);
+
+	*sdata = (int8_t) ae_status;
+
+	return rc;
+}
+
+static int32_t ov5642_set_lens_shading(int8_t lens_shading)
+{
+	int32_t rc = 0;
+	uint8_t reg_val = 0;
+
+	printk("#### %s(%d) ####\n", __FUNCTION__, lens_shading);
+
+//	rc = ov5642_write_mask_reg(0x5000, lens_shading << 7, 1 << 7);
+//	rc = ov5642_write_mask_reg(0x3a00, lens_shading << 2, 1 << 2);
+
+	if (lens_shading == 0)
+	{
+		//;G
+		rc = camsensor_i2c_write_byte(0x5800, 0x7);
+		rc = camsensor_i2c_write_byte(0x5801, 0x5);
+		rc = camsensor_i2c_write_byte(0x5802, 0x4);
+		rc = camsensor_i2c_write_byte(0x5803, 0x3);
+		rc = camsensor_i2c_write_byte(0x5804, 0x3);
+		rc = camsensor_i2c_write_byte(0x5805, 0x4);
+		rc = camsensor_i2c_write_byte(0x5806, 0x5);
+		rc = camsensor_i2c_write_byte(0x5807, 0x8);
+		rc = camsensor_i2c_write_byte(0x5808, 0x3);
+		rc = camsensor_i2c_write_byte(0x5809, 0x3);
+		rc = camsensor_i2c_write_byte(0x580a, 0x2);
+		rc = camsensor_i2c_write_byte(0x580b, 0x2);
+		rc = camsensor_i2c_write_byte(0x580c, 0x2);
+		rc = camsensor_i2c_write_byte(0x580d, 0x2);
+		rc = camsensor_i2c_write_byte(0x580e, 0x3);
+		rc = camsensor_i2c_write_byte(0x580f, 0x4);
+		rc = camsensor_i2c_write_byte(0x5810, 0x2);
+		rc = camsensor_i2c_write_byte(0x5811, 0x1);
+		rc = camsensor_i2c_write_byte(0x5812, 0x1);
+		rc = camsensor_i2c_write_byte(0x5813, 0x0);
+		rc = camsensor_i2c_write_byte(0x5814, 0x0);
+		rc = camsensor_i2c_write_byte(0x5815, 0x1);
+		rc = camsensor_i2c_write_byte(0x5816, 0x1);
+		rc = camsensor_i2c_write_byte(0x5817, 0x2);
+		rc = camsensor_i2c_write_byte(0x5818, 0x2);
+		rc = camsensor_i2c_write_byte(0x5819, 0x1);
+		rc = camsensor_i2c_write_byte(0x581a, 0x0);
+		rc = camsensor_i2c_write_byte(0x581b, 0x0);
+		rc = camsensor_i2c_write_byte(0x581c, 0x0);
+		rc = camsensor_i2c_write_byte(0x581d, 0x0);
+		rc = camsensor_i2c_write_byte(0x581e, 0x1);
+		rc = camsensor_i2c_write_byte(0x581f, 0x2);
+		rc = camsensor_i2c_write_byte(0x5820, 0x1);
+		rc = camsensor_i2c_write_byte(0x5821, 0x1);
+		rc = camsensor_i2c_write_byte(0x5822, 0x0);
+		rc = camsensor_i2c_write_byte(0x5823, 0x0);
+		rc = camsensor_i2c_write_byte(0x5824, 0x0);
+		rc = camsensor_i2c_write_byte(0x5825, 0x0);
+		rc = camsensor_i2c_write_byte(0x5826, 0x1);
+		rc = camsensor_i2c_write_byte(0x5827, 0x2);
+		rc = camsensor_i2c_write_byte(0x5828, 0x2);
+		rc = camsensor_i2c_write_byte(0x5829, 0x1);
+		rc = camsensor_i2c_write_byte(0x582a, 0x1);
+		rc = camsensor_i2c_write_byte(0x582b, 0x0);
+		rc = camsensor_i2c_write_byte(0x582c, 0x0);
+		rc = camsensor_i2c_write_byte(0x582d, 0x1);
+		rc = camsensor_i2c_write_byte(0x582e, 0x1);
+		rc = camsensor_i2c_write_byte(0x582f, 0x2);
+		rc = camsensor_i2c_write_byte(0x5830, 0x3);
+		rc = camsensor_i2c_write_byte(0x5831, 0x3);
+		rc = camsensor_i2c_write_byte(0x5832, 0x2);
+		rc = camsensor_i2c_write_byte(0x5833, 0x2);
+		rc = camsensor_i2c_write_byte(0x5834, 0x2);
+		rc = camsensor_i2c_write_byte(0x5835, 0x2);
+		rc = camsensor_i2c_write_byte(0x5836, 0x2);
+		rc = camsensor_i2c_write_byte(0x5837, 0x4);
+		rc = camsensor_i2c_write_byte(0x5838, 0x8);
+		rc = camsensor_i2c_write_byte(0x5839, 0x5);
+		rc = camsensor_i2c_write_byte(0x583a, 0x4);
+		rc = camsensor_i2c_write_byte(0x583b, 0x3);
+		rc = camsensor_i2c_write_byte(0x583c, 0x3);
+		rc = camsensor_i2c_write_byte(0x583d, 0x4);
+		rc = camsensor_i2c_write_byte(0x583e, 0x5);
+		rc = camsensor_i2c_write_byte(0x583f, 0x8);
+		//;B
+		rc = camsensor_i2c_write_byte(0x5840, 0x5);
+		rc = camsensor_i2c_write_byte(0x5841, 0x9);
+		rc = camsensor_i2c_write_byte(0x5842, 0x5);
+		rc = camsensor_i2c_write_byte(0x5843, 0xa);
+		rc = camsensor_i2c_write_byte(0x5844, 0x4);
+		rc = camsensor_i2c_write_byte(0x5845, 0xd);
+		rc = camsensor_i2c_write_byte(0x5846, 0x8);
+		rc = camsensor_i2c_write_byte(0x5847, 0x10);
+		rc = camsensor_i2c_write_byte(0x5848, 0xe);
+		rc = camsensor_i2c_write_byte(0x5849, 0xd);
+		rc = camsensor_i2c_write_byte(0x584a, 0xf);
+		rc = camsensor_i2c_write_byte(0x584b, 0x8);
+		rc = camsensor_i2c_write_byte(0x584c, 0x8);
+		rc = camsensor_i2c_write_byte(0x584d, 0x10);
+		rc = camsensor_i2c_write_byte(0x584e, 0x10);
+		rc = camsensor_i2c_write_byte(0x584f, 0x10);
+		rc = camsensor_i2c_write_byte(0x5850, 0xc);
+		rc = camsensor_i2c_write_byte(0x5851, 0xe);
+		rc = camsensor_i2c_write_byte(0x5852, 0x8);
+		rc = camsensor_i2c_write_byte(0x5853, 0x11);
+		rc = camsensor_i2c_write_byte(0x5854, 0x10);
+		rc = camsensor_i2c_write_byte(0x5855, 0x10);
+		rc = camsensor_i2c_write_byte(0x5856, 0xe);
+		rc = camsensor_i2c_write_byte(0x5857, 0x9);
+		rc = camsensor_i2c_write_byte(0x5858, 0x9);
+		rc = camsensor_i2c_write_byte(0x5859, 0xe);
+		rc = camsensor_i2c_write_byte(0x585a, 0xe);
+		rc = camsensor_i2c_write_byte(0x585b, 0xd);
+		rc = camsensor_i2c_write_byte(0x585c, 0xc);
+		rc = camsensor_i2c_write_byte(0x585d, 0xd);
+		rc = camsensor_i2c_write_byte(0x585e, 0xc);
+		rc = camsensor_i2c_write_byte(0x585f, 0xc);
+		rc = camsensor_i2c_write_byte(0x5860, 0xa);
+		rc = camsensor_i2c_write_byte(0x5861, 0xc);
+		rc = camsensor_i2c_write_byte(0x5862, 0xb);
+		rc = camsensor_i2c_write_byte(0x5863, 0x7);
+		//;R
+		rc = camsensor_i2c_write_byte(0x5864, 0x12);
+		rc = camsensor_i2c_write_byte(0x5865, 0x18);
+		rc = camsensor_i2c_write_byte(0x5866, 0x1a);
+		rc = camsensor_i2c_write_byte(0x5867, 0x1a);
+		rc = camsensor_i2c_write_byte(0x5868, 0x14);
+		rc = camsensor_i2c_write_byte(0x5869, 0x15);
+		rc = camsensor_i2c_write_byte(0x586a, 0x1d);
+		rc = camsensor_i2c_write_byte(0x586b, 0x19);
+		rc = camsensor_i2c_write_byte(0x586c, 0x17);
+		rc = camsensor_i2c_write_byte(0x586d, 0x16);
+		rc = camsensor_i2c_write_byte(0x586e, 0x18);
+		rc = camsensor_i2c_write_byte(0x586f, 0x16);
+		rc = camsensor_i2c_write_byte(0x5870, 0x19);
+		rc = camsensor_i2c_write_byte(0x5871, 0x14);
+		rc = camsensor_i2c_write_byte(0x5872, 0x10);
+		rc = camsensor_i2c_write_byte(0x5873, 0x10);
+		rc = camsensor_i2c_write_byte(0x5874, 0x13);
+		rc = camsensor_i2c_write_byte(0x5875, 0x1a);
+		rc = camsensor_i2c_write_byte(0x5876, 0x1d);
+		rc = camsensor_i2c_write_byte(0x5877, 0x14);
+		rc = camsensor_i2c_write_byte(0x5878, 0x10);
+		rc = camsensor_i2c_write_byte(0x5879, 0x10);
+		rc = camsensor_i2c_write_byte(0x587a, 0x14);
+		rc = camsensor_i2c_write_byte(0x587b, 0x17);
+		rc = camsensor_i2c_write_byte(0x587c, 0x1d);
+		rc = camsensor_i2c_write_byte(0x587d, 0x19);
+		rc = camsensor_i2c_write_byte(0x587e, 0x17);
+		rc = camsensor_i2c_write_byte(0x587f, 0x16);
+		rc = camsensor_i2c_write_byte(0x5880, 0x17);
+		rc = camsensor_i2c_write_byte(0x5881, 0x1a);
+		rc = camsensor_i2c_write_byte(0x5882, 0x11);
+		rc = camsensor_i2c_write_byte(0x5883, 0x16);
+		rc = camsensor_i2c_write_byte(0x5884, 0x18);
+		rc = camsensor_i2c_write_byte(0x5885, 0x19);
+		rc = camsensor_i2c_write_byte(0x5886, 0x15);
+		rc = camsensor_i2c_write_byte(0x5887, 0x12);
+
+
+		//;low light gamma
+		rc = camsensor_i2c_write_byte(0x5480, 0x00);
+		rc = camsensor_i2c_write_byte(0x5481, 0x0c);  
+		rc = camsensor_i2c_write_byte(0x5482, 0x1e);  
+		rc = camsensor_i2c_write_byte(0x5483, 0x41);  
+		rc = camsensor_i2c_write_byte(0x5484, 0x56);  
+		rc = camsensor_i2c_write_byte(0x5485, 0x68);  
+		rc = camsensor_i2c_write_byte(0x5486, 0x77);  
+		rc = camsensor_i2c_write_byte(0x5487, 0x86);  
+		rc = camsensor_i2c_write_byte(0x5488, 0x91);  
+		rc = camsensor_i2c_write_byte(0x5489, 0x9a);  
+		rc = camsensor_i2c_write_byte(0x548a, 0xaa);  
+		rc = camsensor_i2c_write_byte(0x548b, 0xb7);  
+		rc = camsensor_i2c_write_byte(0x548c, 0xc8);  
+		rc = camsensor_i2c_write_byte(0x548d, 0xd9);  
+		rc = camsensor_i2c_write_byte(0x548e, 0xea);  
+		rc = camsensor_i2c_write_byte(0x548f, 0x1d);
+	}
+	else
+	{
+		//;G
+		rc = camsensor_i2c_write_byte(0x5800, 0x53),
+		rc = camsensor_i2c_write_byte(0x5801, 0x34),
+		rc = camsensor_i2c_write_byte(0x5802, 0x27),
+		rc = camsensor_i2c_write_byte(0x5803, 0x23),
+		rc = camsensor_i2c_write_byte(0x5804, 0x23),
+		rc = camsensor_i2c_write_byte(0x5805, 0x26),
+		rc = camsensor_i2c_write_byte(0x5806, 0x35),
+		rc = camsensor_i2c_write_byte(0x5807, 0x53),
+		rc = camsensor_i2c_write_byte(0x5808, 0x24),
+		rc = camsensor_i2c_write_byte(0x5809, 0x1a),
+		rc = camsensor_i2c_write_byte(0x580a, 0x14),
+		rc = camsensor_i2c_write_byte(0x580b, 0x11),
+		rc = camsensor_i2c_write_byte(0x580c, 0x11),
+		rc = camsensor_i2c_write_byte(0x580d, 0x13),
+		rc = camsensor_i2c_write_byte(0x580e, 0x19),
+		rc = camsensor_i2c_write_byte(0x580f, 0x22),
+		rc = camsensor_i2c_write_byte(0x5810, 0x18),
+		rc = camsensor_i2c_write_byte(0x5811, 0x0f),
+		rc = camsensor_i2c_write_byte(0x5812, 0x09),
+		rc = camsensor_i2c_write_byte(0x5813, 0x05),
+		rc = camsensor_i2c_write_byte(0x5814, 0x05),
+		rc = camsensor_i2c_write_byte(0x5815, 0x08),
+		rc = camsensor_i2c_write_byte(0x5816, 0x0e),
+		rc = camsensor_i2c_write_byte(0x5817, 0x15),
+		rc = camsensor_i2c_write_byte(0x5818, 0x15),
+		rc = camsensor_i2c_write_byte(0x5819, 0x09),
+		rc = camsensor_i2c_write_byte(0x581a, 0x03),
+		rc = camsensor_i2c_write_byte(0x581b, 0x00),
+		rc = camsensor_i2c_write_byte(0x581c, 0x00),
+		rc = camsensor_i2c_write_byte(0x581d, 0x03),
+		rc = camsensor_i2c_write_byte(0x581e, 0x08),
+		rc = camsensor_i2c_write_byte(0x581f, 0x0d),
+		rc = camsensor_i2c_write_byte(0x5820, 0x13),
+		rc = camsensor_i2c_write_byte(0x5821, 0x09),
+		rc = camsensor_i2c_write_byte(0x5822, 0x04),
+		rc = camsensor_i2c_write_byte(0x5823, 0x00),
+		rc = camsensor_i2c_write_byte(0x5824, 0x00),
+		rc = camsensor_i2c_write_byte(0x5825, 0x02),
+		rc = camsensor_i2c_write_byte(0x5826, 0x09),
+		rc = camsensor_i2c_write_byte(0x5827, 0x0e),
+		rc = camsensor_i2c_write_byte(0x5828, 0x1a),
+		rc = camsensor_i2c_write_byte(0x5829, 0x0e),
+		rc = camsensor_i2c_write_byte(0x582a, 0x08),
+		rc = camsensor_i2c_write_byte(0x582b, 0x05),
+		rc = camsensor_i2c_write_byte(0x582c, 0x05),
+		rc = camsensor_i2c_write_byte(0x582d, 0x08),
+		rc = camsensor_i2c_write_byte(0x582e, 0x0d),
+		rc = camsensor_i2c_write_byte(0x582f, 0x12),
+		rc = camsensor_i2c_write_byte(0x5830, 0x23),
+		rc = camsensor_i2c_write_byte(0x5831, 0x1a),
+		rc = camsensor_i2c_write_byte(0x5832, 0x13),
+		rc = camsensor_i2c_write_byte(0x5833, 0x10),
+		rc = camsensor_i2c_write_byte(0x5834, 0x10),
+		rc = camsensor_i2c_write_byte(0x5835, 0x12),
+		rc = camsensor_i2c_write_byte(0x5836, 0x18),
+		rc = camsensor_i2c_write_byte(0x5837, 0x24),
+		rc = camsensor_i2c_write_byte(0x5838, 0x50),
+		rc = camsensor_i2c_write_byte(0x5839, 0x30),
+		rc = camsensor_i2c_write_byte(0x583a, 0x25),
+		rc = camsensor_i2c_write_byte(0x583b, 0x20),
+		rc = camsensor_i2c_write_byte(0x583c, 0x20),
+		rc = camsensor_i2c_write_byte(0x583d, 0x26),
+		rc = camsensor_i2c_write_byte(0x583e, 0x36),
+		rc = camsensor_i2c_write_byte(0x583f, 0x49),
+		//;B
+		rc = camsensor_i2c_write_byte(0x5840, 0x0a),
+		rc = camsensor_i2c_write_byte(0x5841, 0x0e),
+		rc = camsensor_i2c_write_byte(0x5842, 0x0c),
+		rc = camsensor_i2c_write_byte(0x5843, 0x0d),
+		rc = camsensor_i2c_write_byte(0x5844, 0x0c),
+		rc = camsensor_i2c_write_byte(0x5845, 0x0d),
+		rc = camsensor_i2c_write_byte(0x5846, 0x0a),
+		rc = camsensor_i2c_write_byte(0x5847, 0x0b),
+		rc = camsensor_i2c_write_byte(0x5848, 0x0e),
+		rc = camsensor_i2c_write_byte(0x5849, 0x0d),
+		rc = camsensor_i2c_write_byte(0x584a, 0x0d),
+		rc = camsensor_i2c_write_byte(0x584b, 0x08),
+		rc = camsensor_i2c_write_byte(0x584c, 0x0c),
+		rc = camsensor_i2c_write_byte(0x584d, 0x0d),
+		rc = camsensor_i2c_write_byte(0x584e, 0x0f),
+		rc = camsensor_i2c_write_byte(0x584f, 0x10),
+		rc = camsensor_i2c_write_byte(0x5850, 0x0f),
+		rc = camsensor_i2c_write_byte(0x5851, 0x0a),
+		rc = camsensor_i2c_write_byte(0x5852, 0x0c),
+		rc = camsensor_i2c_write_byte(0x5853, 0x0d),
+		rc = camsensor_i2c_write_byte(0x5854, 0x0f),
+		rc = camsensor_i2c_write_byte(0x5855, 0x10),
+		rc = camsensor_i2c_write_byte(0x5856, 0x0f),
+		rc = camsensor_i2c_write_byte(0x5857, 0x09),
+		rc = camsensor_i2c_write_byte(0x5858, 0x0d),
+		rc = camsensor_i2c_write_byte(0x5859, 0x0d),
+		rc = camsensor_i2c_write_byte(0x585a, 0x0d),
+		rc = camsensor_i2c_write_byte(0x585b, 0x0e),
+		rc = camsensor_i2c_write_byte(0x585c, 0x0e),
+		rc = camsensor_i2c_write_byte(0x585d, 0x08),
+		rc = camsensor_i2c_write_byte(0x585e, 0x0c),
+		rc = camsensor_i2c_write_byte(0x585f, 0x0a),
+		rc = camsensor_i2c_write_byte(0x5860, 0x09),
+		rc = camsensor_i2c_write_byte(0x5861, 0x09),
+		rc = camsensor_i2c_write_byte(0x5862, 0x09),
+		rc = camsensor_i2c_write_byte(0x5863, 0x09),
+		//;R
+		rc = camsensor_i2c_write_byte(0x5864, 0x10),
+		rc = camsensor_i2c_write_byte(0x5865, 0x11),
+		rc = camsensor_i2c_write_byte(0x5866, 0x13),
+		rc = camsensor_i2c_write_byte(0x5867, 0x15),
+		rc = camsensor_i2c_write_byte(0x5868, 0x11),
+		rc = camsensor_i2c_write_byte(0x5869, 0x0f),
+		rc = camsensor_i2c_write_byte(0x586a, 0x17),
+		rc = camsensor_i2c_write_byte(0x586b, 0x15),
+		rc = camsensor_i2c_write_byte(0x586c, 0x14),
+		rc = camsensor_i2c_write_byte(0x586d, 0x14),
+		rc = camsensor_i2c_write_byte(0x586e, 0x15),
+		rc = camsensor_i2c_write_byte(0x586f, 0x18),
+		rc = camsensor_i2c_write_byte(0x5870, 0x17),
+		rc = camsensor_i2c_write_byte(0x5871, 0x13),
+		rc = camsensor_i2c_write_byte(0x5872, 0x10),
+		rc = camsensor_i2c_write_byte(0x5873, 0x10),
+		rc = camsensor_i2c_write_byte(0x5874, 0x12),
+		rc = camsensor_i2c_write_byte(0x5875, 0x1a),
+		rc = camsensor_i2c_write_byte(0x5876, 0x18),
+		rc = camsensor_i2c_write_byte(0x5877, 0x13),
+		rc = camsensor_i2c_write_byte(0x5878, 0x10),
+		rc = camsensor_i2c_write_byte(0x5879, 0x10),
+		rc = camsensor_i2c_write_byte(0x587a, 0x12),
+		rc = camsensor_i2c_write_byte(0x587b, 0x1b),
+		rc = camsensor_i2c_write_byte(0x587c, 0x16),
+		rc = camsensor_i2c_write_byte(0x587d, 0x17),
+		rc = camsensor_i2c_write_byte(0x587e, 0x14),
+		rc = camsensor_i2c_write_byte(0x587f, 0x15),
+		rc = camsensor_i2c_write_byte(0x5880, 0x16),
+		rc = camsensor_i2c_write_byte(0x5881, 0x19),
+		rc = camsensor_i2c_write_byte(0x5882, 0x11),
+		rc = camsensor_i2c_write_byte(0x5883, 0x13),
+		rc = camsensor_i2c_write_byte(0x5884, 0x16),
+		rc = camsensor_i2c_write_byte(0x5885, 0x17),
+		rc = camsensor_i2c_write_byte(0x5886, 0x12),
+		rc = camsensor_i2c_write_byte(0x5887, 0x14),
+
+		//;gamma
+		rc = camsensor_i2c_write_byte(0x5480, 0x04);
+		rc = camsensor_i2c_write_byte(0x5481, 0x13);
+		rc = camsensor_i2c_write_byte(0x5482, 0x29);
+		rc = camsensor_i2c_write_byte(0x5483, 0x4f);
+		rc = camsensor_i2c_write_byte(0x5484, 0x61);
+		rc = camsensor_i2c_write_byte(0x5485, 0x6f);
+		rc = camsensor_i2c_write_byte(0x5486, 0x7b);
+		rc = camsensor_i2c_write_byte(0x5487, 0x86);
+		rc = camsensor_i2c_write_byte(0x5488, 0x91);
+		rc = camsensor_i2c_write_byte(0x5489, 0x9a);
+		rc = camsensor_i2c_write_byte(0x548a, 0xaa);
+		rc = camsensor_i2c_write_byte(0x548b, 0xb7);
+		rc = camsensor_i2c_write_byte(0x548c, 0xc8);
+		rc = camsensor_i2c_write_byte(0x548d, 0xd9);
+		rc = camsensor_i2c_write_byte(0x548e, 0xea);
+		rc = camsensor_i2c_write_byte(0x548f, 0x1d);
+	}
+
+	//rc = camsensor_i2c_write_byte(0x350b, 0x00);
+	if(rc < 0)
+	{
+	 return rc;
+	}
+
+	mdelay(300);
+
+	return rc;  
+}
+
+static int32_t ov5642_set_bestshot_mode (int8_t mode)
+{
+	int32_t rc = 0;
+//	uint32_t ary_size=0;
+//	int		i;
+
+#ifdef ENABLE_ADJUSTMENT
+
+//	MSG_HIGH("extra mode type: %d", mode, 0, 0);
+	 switch(mode)
+	 {
+		case CAMERA_BESTSHOT_NIGHT:
+
+			rc = ov5642_write_bestshot_mode_night_reg();			
+			if (rc < 0)
+    		{
+    			return rc;
+    		}	
+		
+		  	break;
+		  	
+		case CAMERA_BESTSHOT_SPORTS:
+#if 0 
+			ary_size = sizeof(cam_extra_mode_sports)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+			for(i=0;i<ary_size;i++)
+			{
+				rc = camsensor_i2c_write_byte(cam_extra_mode_sports[i].addr, cam_extra_mode_sports[i].val);
+			
+				if (rc < 0)
+				{
+         				return rc;
+				}
+			}
+#endif
+		  	break;	
+		  	
+		case CAMERA_BESTSHOT_BEACH:
+			
+			rc = ov5642_write_bestshot_mode_beach_reg();			
+				if (rc < 0)
+				{
+         				return rc;
+				}
+			
+		  	break;		
+		  	
+		case CAMERA_BESTSHOT_PORTRAIT:
+#if 0
+			ary_size = sizeof(cam_extra_mode_portrait)/sizeof(CAM_REG_ADDR_VAL_TYPE);
+
+			for(i=0;i<ary_size;i++)
+			{
+				rc = camsensor_i2c_write_byte(cam_extra_mode_portrait[i].addr, cam_extra_mode_portrait[i].val);
+			
+				if (rc < 0)
+				{
+         				return rc;
+				}
+			}
+#endif		
+			ov5642_style_tuning();
+		  	break;			
+
+#if 0
+		 case CAMERA_BESTSHOT_NORMAL:
+			rc = camsensor_i2c_write_byte(0x3014, 0x2c);
+			if (rc < 0)
+ 			{
+ 				return rc;
+ 			}	
+
+			rc = camsensor_i2c_write_byte(0x3015, 0x31);
+			if (rc < 0)
+ 			{
+ 				return rc;
+ 			}	
+		  	break;
+#endif			
+			
+		default:
+#if 0
+			rc = camsensor_i2c_write_byte(0x3014, 0x2c);
+			if (rc < 0)
+ 			{
+ 				return rc;
+ 			}	
+
+			rc = camsensor_i2c_write_byte(0x3015, 0x12);
+			if (rc < 0)
+ 			{
+ 				return rc;
+ 			}	
+#endif			
+			break;	
+	 }
+
+	if(mode != CAMERA_BESTSHOT_NIGHT)
+	{
+		rc = ov5642_write_bestshot_mode_night_break_reg();
+		if (rc < 0)
+ 		{
+ 			return rc;
+ 		}	
+	}
+#endif //ENABLE_ADJUSTMENT
+	return rc;  
+}
+
+static int32_t ov5642_set_fps(struct fps_cfg *fps)
+{
+	/* input is new fps in Q10 format */
+	int32_t rc = 0;
+	enum msm_s_setting setting;
+
+	ov5642_ctrl->fps_divider = fps->fps_div;
+
+	if (ov5642_ctrl->sensormode == SENSOR_PREVIEW_MODE)
+		setting = S_RES_PREVIEW;
+	else
+		setting = S_RES_CAPTURE;
+
+  rc = ov5642_i2c_write_b(ov5642_client->addr,
+		REG_FRAME_LENGTH_LINES_MSB,
+		(((ov5642_reg_pat[setting].size_h +
+			ov5642_reg_pat[setting].blk_l) *
+			ov5642_ctrl->fps_divider / 0x400) & 0xFF00) >> 8);
+	if (rc < 0)
+		goto set_fps_done;
+
+  rc = ov5642_i2c_write_b(ov5642_client->addr,
+		REG_FRAME_LENGTH_LINES_LSB,
+		(((ov5642_reg_pat[setting].size_h +
+			ov5642_reg_pat[setting].blk_l) *
+			ov5642_ctrl->fps_divider / 0x400) & 0x00FF));
+
+set_fps_done:
+	return rc;
+}
+
+static int32_t ov5642_write_exp_gain(uint16_t gain, uint32_t line)
+{
+	int32_t rc = 0;
+#if 0
+	uint16_t max_legal_gain = 0x0200;
+	uint32_t ll_ratio; /* Q10 */
+	uint32_t ll_pck, fl_lines;
+	uint16_t offset = 4;
+	uint32_t  gain_msb, gain_lsb;
+	uint32_t  intg_t_msb, intg_t_lsb;
+	uint32_t  ll_pck_msb, ll_pck_lsb;
+
+	struct ov5642_i2c_reg_conf tbl[2];
+
+	CDBG("Line:%d ov5642_write_exp_gain \n", __LINE__);
+
+	if (ov5642_ctrl->sensormode == SENSOR_PREVIEW_MODE) {
+
+		ov5642_ctrl->my_reg_gain = gain;
+		ov5642_ctrl->my_reg_line_count = (uint16_t)line;
+
+		fl_lines = ov5642_reg_pat[S_RES_PREVIEW].size_h +
+			ov5642_reg_pat[S_RES_PREVIEW].blk_l;
+
+		ll_pck = ov5642_reg_pat[S_RES_PREVIEW].size_w +
+			ov5642_reg_pat[S_RES_PREVIEW].blk_p;
+
+	} else {
+
+		fl_lines = ov5642_reg_pat[S_RES_CAPTURE].size_h +
+			ov5642_reg_pat[S_RES_CAPTURE].blk_l;
+
+		ll_pck = ov5642_reg_pat[S_RES_CAPTURE].size_w +
+			ov5642_reg_pat[S_RES_CAPTURE].blk_p;
+	}
+
+	if (gain > max_legal_gain)
+		gain = max_legal_gain;
+
+	/* in Q10 */
+	line = (line * ov5642_ctrl->fps_divider);
+
+	if (fl_lines < (line / 0x400))
+		ll_ratio = (line / (fl_lines - offset));
+	else
+		ll_ratio = 0x400;
+
+	/* update gain registers */
+	gain_msb = (gain & 0xFF00) >> 8;
+	gain_lsb = gain & 0x00FF;
+	tbl[0].waddr = REG_ANALOGUE_GAIN_CODE_GLOBAL_MSB;
+	tbl[0].bdata = gain_msb;
+	tbl[1].waddr = REG_ANALOGUE_GAIN_CODE_GLOBAL_LSB;
+	tbl[1].bdata = gain_lsb;
+	rc = ov5642_i2c_write_table(&tbl[0], ARRAY_SIZE(tbl));
+	if (rc < 0)
+		goto write_gain_done;
+
+	ll_pck = ll_pck * ll_ratio;
+	ll_pck_msb = ((ll_pck / 0x400) & 0xFF00) >> 8;
+	ll_pck_lsb = (ll_pck / 0x400) & 0x00FF;
+	tbl[0].waddr = REG_LINE_LENGTH_PCK_MSB;
+	tbl[0].bdata = ll_pck_msb;
+	tbl[1].waddr = REG_LINE_LENGTH_PCK_LSB;
+	tbl[1].bdata = ll_pck_lsb;
+	rc = ov5642_i2c_write_table(&tbl[0], ARRAY_SIZE(tbl));
+	if (rc < 0)
+		goto write_gain_done;
+
+	line = line / ll_ratio;
+	intg_t_msb = (line & 0xFF00) >> 8;
+	intg_t_lsb = (line & 0x00FF);
+	tbl[0].waddr = REG_COARSE_INTEGRATION_TIME;
+	tbl[0].bdata = intg_t_msb;
+	tbl[1].waddr = REG_COARSE_INTEGRATION_TIME_LSB;
+	tbl[1].bdata = intg_t_lsb;
+	rc = ov5642_i2c_write_table(&tbl[0], ARRAY_SIZE(tbl));
+#endif
+write_gain_done:
+	return rc;
+}
+
+static int32_t ov5642_set_pict_exp_gain(uint16_t gain, uint32_t line)
+{
+	int32_t rc = 0;
+
+	CDBG("Line:%d ov5642_set_pict_exp_gain \n", __LINE__);
+
+	rc =
+		ov5642_write_exp_gain(gain, line);
+
+	return rc;
+}
+
+static int32_t ov5642_video_config(int mode, int res)
+{
+	int32_t rc = 0;
+	int32_t count = 0;
+
+	switch (res) {
+	case S_QTR_SIZE:
+		do
+		{
+			if (rc < 0)
+			{
+				printk("[camera] video_config reinit retry%d\n", count);
+
+				ov5642_power_down();
+				
+				gpio_direction_output(ov5642_ctrl->sensordata->sensor_reset,
+					0);
+				gpio_free(ov5642_ctrl->sensordata->sensor_reset);
+				
+				gpio_direction_output(ov5642_ctrl->sensordata->sensor_pwd,
+					0);
+				gpio_free(ov5642_ctrl->sensordata->sensor_pwd);
+				mdelay(1);
+				
+				/*disable clk*/
+				msm_camio_clk_disable(CAMIO_VFE_CLK);
+				printk("[ouyang] ov5642_power_disable in ov5642_video_config1\n");
+				ov5642_power_disable();
+
+				mdelay(10);
+				rc = ov5642_sensor_init(ov5642_ctrl->sensordata);
+				if (rc < 0)
+				{
+					printk("[camera] video_config reinit failed. rc = %d retry%d\n", rc, count);
+					return rc;
+				}
+				count++;
+			}
+			rc = ov5642_setting(S_UPDATE_PERIODIC, S_RES_PREVIEW);
+		} while(OV5642_PREVIEW_RETRY_COUNT > count && rc != 0);
+
+		if (rc < 0)
+			return rc;
+
+		CDBG("ov5642 sensor configuration done!\n");
+		break;
+
+	case S_FULL_SIZE:
+		do
+		{
+			if (rc < 0)
+			{
+				printk("[camera] video_config reinit retry%d\n", count);
+
+				ov5642_power_down();
+				
+				gpio_direction_output(ov5642_ctrl->sensordata->sensor_reset,
+					0);
+				gpio_free(ov5642_ctrl->sensordata->sensor_reset);
+				
+				gpio_direction_output(ov5642_ctrl->sensordata->sensor_pwd,
+					0);
+				gpio_free(ov5642_ctrl->sensordata->sensor_pwd);
+				mdelay(1);
+				
+				/*disable clk*/
+				msm_camio_clk_disable(CAMIO_VFE_CLK);
+				printk("[ouyang] ov5642_power_disable in ov5642_video_config2\n");
+				ov5642_power_disable();
+
+				mdelay(10);
+				rc = ov5642_sensor_init(ov5642_ctrl->sensordata);
+				if (rc < 0)
+				{
+					printk("[camera] video_config reinit failed. rc = %d retry%d\n", rc, count);
+					return rc;
+				}
+				count++;
+			}
+			rc = ov5642_setting(S_UPDATE_PERIODIC, S_RES_CAPTURE);
+		} while(OV5642_PREVIEW_RETRY_COUNT > count && rc != 0);
+		if (rc < 0)
+			return rc;
+
+		break;
+
+	default:
+		return 0;
+	} /* switch */
+
+	ov5642_ctrl->prev_res = res;
+	ov5642_ctrl->curr_res = res;
+	ov5642_ctrl->sensormode = mode;
+
+	rc =
+		ov5642_write_exp_gain(ov5642_ctrl->my_reg_gain,
+			ov5642_ctrl->my_reg_line_count);
+
+	return rc;
+}
+
+static int32_t ov5642_snapshot_config(int mode)
+{
+	int32_t rc = 0;
+
+	rc = ov5642_setting(S_UPDATE_PERIODIC, S_RES_CAPTURE);
+	if (rc < 0)
+		return rc;
+
+	ov5642_ctrl->curr_res = ov5642_ctrl->pict_res;
+	ov5642_ctrl->sensormode = mode;
+
+	return rc;
+}
+
+static int32_t ov5642_raw_snapshot_config(int mode)
+{
+	int32_t rc = 0;
+
+	rc = ov5642_setting(S_UPDATE_PERIODIC, S_RES_CAPTURE);
+	if (rc < 0)
+		return rc;
+
+	ov5642_ctrl->curr_res = ov5642_ctrl->pict_res;
+	ov5642_ctrl->sensormode = mode;
+
+	return rc;
+}
+
+static int32_t ov5642_set_sensor_mode(int mode, int res)
+{
+	int32_t rc = 0;
+
+	switch (mode) {
+	case SENSOR_PREVIEW_MODE:
+		rc = ov5642_video_config(mode, res);
+		break;
+
+	case SENSOR_SNAPSHOT_MODE:
+		rc = ov5642_snapshot_config(mode);
+		break;
+
+	case SENSOR_RAW_SNAPSHOT_MODE:
+		rc = ov5642_raw_snapshot_config(mode);
+		break;
+
+	default:
+		rc = -EINVAL;
+		break;
+	}
+
+	return rc;
+}
+
+static int32_t ov5642_set_default_focus(void)
+{
+	int32_t rc = 0;
+#if 0
+  rc = ov5642_i2c_write_b(ov5642_client->addr,
+		0x3131, 0);
+	if (rc < 0)
+		return rc;
+
+  rc = ov5642_i2c_write_b(ov5642_client->addr,
+		0x3132, 0);
+	if (rc < 0)
+		return rc;
+
+	ov5642_ctrl->curr_lens_pos = 0;
+#endif
+	return rc;
+}
+
+static int32_t ov5642_move_focus(int direction, int32_t num_steps)
+{
+	int32_t rc = 0;
+	int32_t i;
+	int16_t step_direction;
+	int16_t actual_step;
+	int16_t next_pos, pos_offset;
+	int16_t init_code = 50;
+	uint8_t next_pos_msb, next_pos_lsb;
+	int16_t s_move[5];
+	uint32_t gain; /* Q10 format */
+
+	if (direction == MOVE_NEAR)
+		step_direction = 20;
+	else if (direction == MOVE_FAR)
+		step_direction = -20;
+	else {
+		CDBG("ov5642_move_focus failed at line %d ...\n", __LINE__);
+		return -EINVAL;
+	}
+
+	actual_step = step_direction * (int16_t)num_steps;
+	pos_offset = init_code + ov5642_ctrl->curr_lens_pos;
+	gain = actual_step * 0x400 / 5;
+
+	for (i = 0; i <= 4; i++) {
+		if (actual_step >= 0)
+			s_move[i] = (((i+1)*gain+0x200)-(i*gain+0x200))/0x400;
+		else
+			s_move[i] = (((i+1)*gain-0x200)-(i*gain-0x200))/0x400;
+	}
+
+	/* Ring Damping Code */
+	for (i = 0; i <= 4; i++) {
+		next_pos = (int16_t)(pos_offset + s_move[i]);
+
+		if (next_pos > (738 + init_code))
+			next_pos = 738 + init_code;
+		else if (next_pos < 0)
+			next_pos = 0;
+
+		CDBG("next_position in damping mode = %d\n", next_pos);
+		/* Writing the Values to the actuator */
+		if (next_pos == init_code)
+			next_pos = 0x00;
+
+		next_pos_msb = next_pos >> 8;
+		next_pos_lsb = next_pos & 0x00FF;
+
+		rc = ov5642_i2c_write_b(ov5642_client->addr,
+			0x3131, next_pos_msb);
+		if (rc < 0)
+			break;
+
+		rc = ov5642_i2c_write_b(ov5642_client->addr,
+			0x3132, next_pos_lsb);
+		if (rc < 0)
+			break;
+
+		pos_offset = next_pos;
+		ov5642_ctrl->curr_lens_pos = pos_offset - init_code;
+		if (i < 4)
+			mdelay(3);
+	}
+
+	return rc;
+}
+
+static int ov5642_sensor_config(void __user *argp)
+{
+	struct sensor_cfg_data cdata;
+	long   rc = 0;
+
+	if (copy_from_user(&cdata,
+			(void *)argp,
+			sizeof(struct sensor_cfg_data)))
+		return -EFAULT;
+
+	mutex_lock(&ov5642_mutex);
+
+	CDBG("%s: cfgtype = %d\n", __func__, cdata.cfgtype);
+	//printk("%s: cfgtype = %d\n", __func__, cdata.cfgtype);
+	switch (cdata.cfgtype) {
+	case CFG_GET_PICT_FPS:
+		ov5642_get_pict_fps(cdata.cfg.gfps.prevfps,
+			&(cdata.cfg.gfps.pictfps));
+
+		if (copy_to_user((void *)argp, &cdata,
+				sizeof(struct sensor_cfg_data)))
+			rc = -EFAULT;
+		break;
+
+	case CFG_GET_PREV_L_PF:
+		cdata.cfg.prevl_pf = ov5642_get_prev_lines_pf();
+
+		if (copy_to_user((void *)argp,
+				&cdata,
+				sizeof(struct sensor_cfg_data)))
+			rc = -EFAULT;
+		break;
+
+	case CFG_GET_PREV_P_PL:
+		cdata.cfg.prevp_pl = ov5642_get_prev_pixels_pl();
+
+		if (copy_to_user((void *)argp,
+				&cdata,
+				sizeof(struct sensor_cfg_data)))
+			rc = -EFAULT;
+		break;
+
+	case CFG_GET_PICT_L_PF:
+		cdata.cfg.pictl_pf = ov5642_get_pict_lines_pf();
+
+		if (copy_to_user((void *)argp,
+				&cdata,
+				sizeof(struct sensor_cfg_data)))
+			rc = -EFAULT;
+		break;
+
+	case CFG_GET_PICT_P_PL:
+		cdata.cfg.pictp_pl = ov5642_get_pict_pixels_pl();
+
+		if (copy_to_user((void *)argp,
+				&cdata,
+				sizeof(struct sensor_cfg_data)))
+			rc = -EFAULT;
+		break;
+
+	case CFG_GET_PICT_MAX_EXP_LC:
+		cdata.cfg.pict_max_exp_lc =
+			ov5642_get_pict_max_exp_lc();
+
+		if (copy_to_user((void *)argp,
+				&cdata,
+				sizeof(struct sensor_cfg_data)))
+			rc = -EFAULT;
+		break;
+
+	case CFG_SET_FPS:
+	case CFG_SET_PICT_FPS:
+		rc = ov5642_set_fps(&(cdata.cfg.fps));
+		break;
+
+	case CFG_SET_EXP_GAIN:
+		rc =
+			ov5642_write_exp_gain(cdata.cfg.exp_gain.gain,
+				cdata.cfg.exp_gain.line);
+		break;
+
+	case CFG_SET_PICT_EXP_GAIN:
+		CDBG("Line:%d CFG_SET_PICT_EXP_GAIN \n", __LINE__);
+		rc =
+			ov5642_set_pict_exp_gain(
+				cdata.cfg.exp_gain.gain,
+				cdata.cfg.exp_gain.line);
+		break;
+
+	case CFG_SET_MODE:
+		rc =
+			ov5642_set_sensor_mode(
+			cdata.mode, cdata.rs);
+		break;
+
+	case CFG_PWR_DOWN:
+		rc = ov5642_power_down();
+		break;
+
+	case CFG_MOVE_FOCUS:
+		rc =
+			ov5642_move_focus(
+			cdata.cfg.focus.dir,
+			cdata.cfg.focus.steps);
+		break;
+
+	case CFG_SET_DEFAULT_FOCUS:
+		rc =
+			ov5642_set_default_focus();
+		break;
+
+	case CFG_SET_EFFECT:
+		rc = ov5642_set_effect(
+					cdata.cfg.effect);
+		break;
+
+	case CFG_SET_WB:
+			rc = ov5642_set_wb(
+						cdata.cfg.wb);
+			break;
+			
+	case CFG_SET_BRIGHTNESS:
+			rc = ov5642_set_brightness(
+						cdata.cfg.brightness);
+			break;
+
+	case CFG_SET_ANTIBANDING:
+			rc = ov5642_set_antibanding(
+						cdata.cfg.antibanding);
+			break;	
+
+	case CFG_SET_CONTRAST:
+			rc = ov5642_set_contrast(
+						cdata.cfg.contrast);
+			break;
+
+	case CFG_SET_ISO:
+			rc = ov5642_set_iso(
+					cdata.cfg.iso);
+		break;	
+
+	case CFG_SET_EXPOSURE_MODE:
+		rc = ov5642_set_exposure_mode(
+					cdata.cfg.exposure_mode);
+		break;	
+
+	case CFG_GET_AE_STATUS:
+		{
+			uint8_t	*sdata = &cdata.cfg.ae_fps;
+			rc = ov5642_get_ae_status(sdata);
+			if (!rc && copy_to_user(argp, &cdata, sizeof(struct sensor_cfg_data)))
+				rc = -EFAULT;
+		}
+		break;
+
+	case CFG_SET_LENS_SHADING:
+		rc = ov5642_set_lens_shading(
+					cdata.cfg.lens_shading);
+		break;
+	
+	case CFG_GET_AF_MAX_STEPS:
+	default:
+		rc = -EINVAL;
+		break;
+	}
+
+	mutex_unlock(&ov5642_mutex);
+	return rc;
+}
+
+static int ov5642_sensor_probe(const struct msm_camera_sensor_info *info,
+		struct msm_sensor_ctrl *s)
+{
+	int rc = 0;
+
+	/* pull down power-down */
+	rc = gpio_request(info->sensor_pwd, "ov5642");
+	printk("[camera] gpio_request pwd high=%d\n", rc);
+	if (!rc || rc == -EBUSY)
+		gpio_direction_output(info->sensor_pwd, 1);
+	else printk(KERN_ERR "ov5642 error: request gpio %d failed: "
+			"%d\n", info->sensor_pwd, rc);
+#if 0
+	rc = gpio_request(info->sensor_reset, "ov5642");
+	printk("[camera] gpio_request reset=%d\n", rc);
+	if (!rc || rc == -EBUSY)
+		gpio_direction_output(info->sensor_reset, 0);
+	else printk(KERN_ERR "ov5642 error: request gpio %d failed: "
+			"%d\n", info->sensor_reset, rc);
+#endif
+	ov5642_power_enable();
+
+	rc = gpio_request(info->sensor_pwd, "ov5642");
+	printk("[camera] gpio_request pwd high=%d\n", rc);
+	if (!rc || rc == -EBUSY)
+		gpio_direction_output(info->sensor_pwd, 0);
+	else printk(KERN_ERR "ov5642 error: request gpio %d failed: "
+			"%d\n", info->sensor_pwd, rc);
+	mdelay(10);
+
+	rc = gpio_request(info->sensor_reset, "ov5642");
+	printk("[camera] gpio_request reset=%d\n", rc);
+	if (!rc || rc == -EBUSY)
+		gpio_direction_output(info->sensor_reset, 1);
+	else printk(KERN_ERR "ov5642 error: request gpio %d failed: "
+			"%d\n", info->sensor_reset, rc);
+
+	/* enable clk */
+	msm_camio_clk_enable(CAMIO_VFE_CLK);
+
+	msm_camio_clk_rate_set(OV5642_DEFAULT_CLOCK_RATE);
+	mdelay(100);
+	printk("[YC] Begin i2c_add_driver \n");	
+	rc = i2c_add_driver(&ov5642_i2c_driver);
+	if (rc < 0 || ov5642_client == NULL) {
+		printk("[OY] i2c_add_driver Fail \n");	
+		rc = -ENOTSUPP;
+		goto probe_fail;
+	}
+	printk("[YC] i2c_add_driver =%d\n", rc);	
+	/* pull up power-down */
+
+	rc = ov5642_probe_init_sensor(info);
+	printk("[camera] ov5642_probe_init_sensor=%d\n", rc);
+	if (rc < 0)
+		goto probe_fail;
+
+	s->s_init = ov5642_sensor_open_init;
+	s->s_release = ov5642_sensor_release;
+	s->s_config  = ov5642_sensor_config;
+
+	ov5642_power_down();
+
+	ov5642_probe_init_done(info);
+
+	/*disable clk*/
+	msm_camio_clk_disable(CAMIO_VFE_CLK);
+       printk("[ouyang] ov5642_power_disable in ov5642_sensor_probe1\n");
+	ov5642_power_disable();
+
+	return rc;
+
+probe_fail:
+
+	ov5642_power_down();
+
+	/*disable clk*/
+	msm_camio_clk_disable(CAMIO_VFE_CLK);
+       printk("[ouyang] ov5642_power_disable in ov5642_sensor_probe2\n");
+	ov5642_power_disable();
+
+	CDBG("SENSOR PROBE FAILS!\n");
+	return rc;
+}
+
+static int __ov5642_probe(struct platform_device *pdev)
+{
+	return msm_camera_drv_start(pdev, ov5642_sensor_probe);
+}
+
+static struct platform_driver msm_camera_driver = {
+	.probe = __ov5642_probe,
+	.driver = {
+		.name = "msm_camera_ov5642",
+		.owner = THIS_MODULE,
+	},
+};
+
+static int __init ov5642_init(void)
+{
+	cci_smem_value_t *smem_cci_smem_value;
+	smem_cci_smem_value = smem_alloc( SMEM_CCI_SMEM_VALUE, sizeof( cci_smem_value_t ));
+    	printk("#### cci_project_id=%d ####\n", smem_cci_smem_value->cci_project_id);
+
+		return platform_driver_register(&msm_camera_driver);
+
+}
+
+module_init(ov5642_init);
+

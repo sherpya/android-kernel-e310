@@ -1,0 +1,3 @@
+config CCI_EASY_UPDATE
+	tristate "Easy update function for K4"
+	default y

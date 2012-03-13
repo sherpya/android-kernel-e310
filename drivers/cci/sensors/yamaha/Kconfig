@@ -1,0 +1,4 @@
+source "drivers/cci/sensors/yamaha/accelerometer/Kconfig"
+source "drivers/cci/sensors/yamaha/geomagnetic/Kconfig"
+source "drivers/cci/sensors/yamaha/orientation/Kconfig"
+

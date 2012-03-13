@@ -1,0 +1,7 @@
+config CCI_PMIC_VIBRATOR
+	tristate "MSM PMIC vibrator driver"
+	default n
+
+config CCI_SMEM_VIBRATOR
+	tristate "CCI SMEM vibrator driver"
+	default y

@@ -1,0 +1,9 @@
+config CCI_PMIC_LEDS_KEY
+	tristate "MSM PMIC keypad backlight leds driver"
+	default y
+config CCI_PMIC_NLED
+	tristate "MSM PMIC Notification LED driver"
+	default y
+config CCI_LED_AN32155A
+	tristate "Panasonic AN32155A LED controller driver"
+	default y

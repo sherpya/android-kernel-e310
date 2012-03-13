@@ -1,0 +1,17 @@
+#
+# Compalcomm drivers
+#
+
+menuconfig CCI_DRIVERS
+        tristate "Compalcomm drivers."                                                                              
+        default y
+
+if CCI_DRIVERS
+
+source "drivers/cci/vibrator/Kconfig"
+source "drivers/cci/leds/Kconfig"
+source "drivers/cci/sensors/yamaha/Kconfig"
+#source "drivers/cci/optmouse/Kconfig"
+source "drivers/cci/easy_update/Kconfig"
+
+endif
