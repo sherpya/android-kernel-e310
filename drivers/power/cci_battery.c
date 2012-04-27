@@ -946,49 +946,6 @@ static void msm_batt_external_power_changed(struct power_supply *psy)
     power_supply_changed(psy);
 }
 
-static s32 capacity_algo(s32 capacity)
-{
-    int rtn = 50;
-
-    if(capacity >= 100 ) //5% range, 100% - 70%
-        rtn = 100;
-    else if (capacity >= 99)
-        rtn = 99; 
-    else if (capacity >= 95)
-        rtn = 95;
-    else if (capacity >= 90)
-        rtn = 90;
-    else if (capacity >= 85)
-        rtn = 85;
-    else if (capacity >= 80)
-        rtn = 80;
-    else if (capacity >= 75)
-        rtn = 75;
-    else if (capacity >= 70)//10% range, 70% - 20%
-        rtn = 70;
-    else if (capacity >= 60)
-        rtn = 60;
-    else if (capacity >= 50)
-        rtn = 50;
-    else if (capacity >= 40)
-        rtn = 40;
-    else if (capacity >= 30)
-        rtn = 30;
-    else if (capacity >= 20)
-        rtn = 20;
-    else if (capacity >= 15) //5% ragne, 20% - 0%
-        rtn = 15;
-    else if (capacity >= 10)
-        rtn = 10;
-    else if (capacity >= 5)
-        rtn = 5;
-    else if (capacity >= 1)
-        rtn = 1;
-    else if (capacity == 0)
-        rtn = 0;
-
-    return rtn;
-}
 static int msm_batt_power_get_property(struct power_supply *psy,
                                        enum power_supply_property psp,
                                        union power_supply_propval *val)
@@ -1017,8 +974,7 @@ static int msm_batt_power_get_property(struct power_supply *psy,
           }
         case POWER_SUPPLY_PROP_CAPACITY: //5
          {   
-            val->intval =  capacity_algo(msm_batt_info.batt_capacity);
-	    batt_capacity=capacity_algo(msm_batt_info.batt_capacity);
+            val->intval = batt_capacity = msm_batt_info.batt_capacity;
             break;
           }
         case POWER_SUPPLY_PROP_TEMP: //6
