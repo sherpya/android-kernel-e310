@@ -1957,7 +1957,7 @@ static void msm_pm_restart(char str, const char *cmd)
 	    err = cci_rpc_reboot(RPC_REBOOT_TYPE_RECOVERY);
 	}
 	else if(restart_reason == 0x77665500) {
-	    err = cci_rpc_reboot(RPC_REBOOT_TYPE_MODEM_DLOAD);
+	    err = cci_rpc_reboot(RPC_REBOOT_TYPE_ANDROID_DLOAD);
 	} 
 	else if(restart_reason == 0x77665544) {
 	    err = cci_rpc_reboot(RPC_REBOOT_TYPE_SD_DLOAD);
